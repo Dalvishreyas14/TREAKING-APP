@@ -3,7 +3,7 @@
 import * as React from "react";
 import { useRouter } from "next/navigation";
 import { toast } from "sonner";
-import { Check, Flame, Play, Star, Trash2, Zap } from "lucide-react";
+import { BookOpen, Check, Flame, Pause, Play, Star, Trash2, Zap } from "lucide-react";
 
 import { EmptyState } from "@/components/feedback/empty-state";
 import { Badge } from "@/components/ui/badge";
@@ -54,6 +54,11 @@ export interface FocusSessionRow {
   notes: string | null;
   endedEarly: boolean;
   xpAwarded: number;
+  pausedAt: string | null;
+  pausedSeconds: number;
+  studySessionId: string | null;
+  studyTitle: string | null;
+  studySubject: string | null;
   unfinished: boolean;
 }
 
@@ -134,6 +139,11 @@ export function FocusTimer({
    * Elapsed is recomputed from it rather than resumed from a local counter,
    * because the local counter is exactly what a reload throws away.
    *
+   * While paused, elapsed is measured to the *pause instant* instead of to now,
+   * and the time already spent paused is subtracted. Both numbers come from the
+   * server: a pause the browser only remembered would vanish on reload and the
+   * paused minutes would silently reappear as work.
+   *
    * `nowMs` is the only thing the interval writes, and elapsed is *derived* from
    * it during render. Storing the elapsed count directly would need the effect
    * body to call `setState` synchronously to reset it when the timer stops, which
@@ -141,18 +151,26 @@ export function FocusTimer({
    * falls out of the arithmetic instead of being pushed into state.
    */
   const startedAtMs = running ? new Date(running.startedAt).getTime() : null;
+  const pausedAtMs = running?.pausedAt ? new Date(running.pausedAt).getTime() : null;
   const [nowMs, setNowMs] = React.useState(() => Date.now());
 
   React.useEffect(() => {
-    if (startedAtMs === null) return;
+    if (startedAtMs === null || pausedAtMs !== null) return;
     const tick = () => setNowMs(Date.now());
     tick();
     const id = window.setInterval(tick, 1000);
     return () => window.clearInterval(id);
-  }, [startedAtMs]);
+  }, [startedAtMs, pausedAtMs]);
 
   const elapsed =
-    startedAtMs === null ? 0 : Math.max(0, Math.floor((nowMs - startedAtMs) / 1000));
+    startedAtMs === null
+      ? 0
+      : Math.max(
+          0,
+          Math.floor(((pausedAtMs ?? nowMs) - startedAtMs) / 1000) -
+            (running?.pausedSeconds ?? 0),
+        );
+  const paused = pausedAtMs !== null;
 
   const activePlanned = running?.plannedSeconds ?? plannedSeconds;
   const over = elapsed > activePlanned;
@@ -187,6 +205,11 @@ export function FocusTimer({
           notes: null,
           endedEarly: false,
           xpAwarded: 0,
+          pausedAt: null,
+          pausedSeconds: 0,
+          studySessionId: null,
+          studyTitle: null,
+          studySubject: null,
           unfinished: true,
         },
         ...prev,
@@ -201,11 +224,64 @@ export function FocusTimer({
     }
   }
 
-  async function finish() {
+  async function pause() {
     if (!runningId) return;
     setBusy(true);
     try {
-      const saved = await api.patch<{ xpAwarded: number }>(`/api/v1/focus/${runningId}`, {
+      const saved = await api.post<{ pausedAt: string; pausedSeconds: number }>(
+        `/api/v1/focus/${runningId}/pause`,
+      );
+      setSessions((prev) =>
+        prev.map((s) =>
+          s.id === runningId
+            ? { ...s, pausedAt: saved.pausedAt, pausedSeconds: saved.pausedSeconds }
+            : s,
+        ),
+      );
+      setNowMs(Date.now());
+      toast.info("Paused. The clock is stopped.");
+    } catch (error) {
+      toast.error(error instanceof ApiClientError ? error.message : "Could not pause the session.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function resumeTimer() {
+    if (!runningId) return;
+    setBusy(true);
+    try {
+      const saved = await api.post<{ pausedAt: string | null; pausedSeconds: number }>(
+        `/api/v1/focus/${runningId}/resume`,
+      );
+      setSessions((prev) =>
+        prev.map((s) =>
+          s.id === runningId
+            ? { ...s, pausedAt: saved.pausedAt, pausedSeconds: saved.pausedSeconds }
+            : s,
+        ),
+      );
+      setNowMs(Date.now());
+      toast.success("Back to it.");
+    } catch (error) {
+      toast.error(
+        error instanceof ApiClientError ? error.message : "Could not resume the session.",
+      );
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function finish() {
+    if (!runningId) return;
+    const linkedStudyTitle = running?.studyTitle ?? null;
+    setBusy(true);
+    try {
+      const saved = await api.patch<{
+        xpAwarded: number;
+        actualSeconds: number;
+        endedEarly: boolean;
+      }>(`/api/v1/focus/${runningId}`, {
         rating: rating > 0 ? rating : null,
         notes: notes.trim() || null,
       });
@@ -215,11 +291,12 @@ export function FocusTimer({
             ? {
                 ...s,
                 endedAt: new Date().toISOString(),
-                actualSeconds: elapsed,
+                actualSeconds: saved.actualSeconds,
                 rating: rating > 0 ? rating : null,
                 notes: notes.trim() || null,
-                endedEarly: elapsed < s.plannedSeconds,
+                endedEarly: saved.endedEarly,
                 xpAwarded: saved.xpAwarded,
+                pausedAt: null,
                 unfinished: false,
               }
             : s,
@@ -230,7 +307,11 @@ export function FocusTimer({
       setRating(0);
       setNotes("");
       setDialogError(null);
-      toast.success("Session saved.");
+      toast.success(
+        linkedStudyTitle
+          ? `Saved — ${linkedStudyTitle} marked done.`
+          : "Session saved.",
+      );
       router.refresh();
     } catch (error) {
       setDialogError(
@@ -268,24 +349,48 @@ export function FocusTimer({
               size={216}
               thickness={10}
               label="Session progress"
-              color={over ? "var(--coral)" : "var(--lime)"}
+              color={paused ? "var(--amber)" : over ? "var(--coral)" : "var(--lime)"}
             >
               <div className="flex flex-col items-center gap-1">
                 <span className="font-mono text-[34px] leading-none font-semibold tabular-nums">
                   {clock(elapsed)}
                 </span>
-                <span className="text-xs text-ink-subtle">of {clock(activePlanned)}</span>
+                <span className="text-xs text-ink-subtle">
+                  {paused ? "paused" : `of ${clock(activePlanned)}`}
+                </span>
               </div>
             </ProgressRing>
 
             {running ? (
               <div className="flex flex-col items-center gap-3">
-                <p className="text-sm text-ink-muted">
-                  {running.taskTitle ? `Focusing on ${running.taskTitle}` : "Free focus"}
-                </p>
+                <div className="flex flex-col items-center gap-1">
+                  <p className="text-sm text-ink-muted">
+                    {running.studyTitle
+                      ? `Studying ${running.studyTitle}`
+                      : running.taskTitle
+                        ? `Focusing on ${running.taskTitle}`
+                        : "Free focus"}
+                  </p>
+                  {running.studyTitle ? (
+                    <span className="flex items-center gap-1.5 text-[11px] text-ink-subtle">
+                      <BookOpen className="size-3.5" />
+                      {running.studySubject ?? "Study session"} · the time you actually
+                      focus is written back to the timetable when you finish
+                    </span>
+                  ) : null}
+                </div>
                 <div className="flex flex-wrap items-center justify-center gap-2">
+                  {paused ? (
+                    <Button variant="lime" size="lg" onClick={resumeTimer} disabled={busy}>
+                      <Play /> Resume
+                    </Button>
+                  ) : (
+                    <Button variant="secondary" size="lg" onClick={pause} disabled={busy}>
+                      <Pause /> Pause
+                    </Button>
+                  )}
                   <Button
-                    variant="lime"
+                    variant={paused ? "secondary" : "lime"}
                     size="lg"
                     onClick={() => setPendingId(running.id)}
                     disabled={busy}
@@ -365,6 +470,7 @@ export function FocusTimer({
                   <span className="truncate text-sm text-ink-subtle">
                     Started {relativeDay(s.startedAt)} at{" "}
                     {formatLocalClockTime(new Date(s.startedAt))}
+                    {s.pausedAt ? " · paused" : ""}
                   </span>
                   <div className="flex shrink-0 gap-2">
                     <Button size="sm" variant="secondary" onClick={() => setRunningId(s.id)}>
@@ -398,7 +504,7 @@ export function FocusTimer({
                   <li key={s.id} className="flex items-center gap-3 py-3">
                     <div className="flex min-w-0 flex-1 flex-col">
                       <span className="truncate text-sm font-medium text-ink">
-                        {s.taskTitle ?? "Free focus"}
+                        {s.taskTitle ?? s.studyTitle ?? "Free focus"}
                       </span>
                       <span className="text-xs text-ink-subtle">
                         {relativeDay(s.startedAt)} ·{" "}

@@ -2,12 +2,25 @@ import { GraduationCap } from "lucide-react";
 
 import { ActivityStrip, type ActivityPoint } from "@/components/app/activity-strip";
 import { CategoryTracker, type DomainHabit } from "@/components/app/category-tracker";
+import {
+  WeeklySchedule,
+  type StudySeriesView,
+} from "@/components/app/study/weekly-schedule";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { requireUser } from "@/lib/auth/guards";
 import { prisma } from "@/lib/db";
-import { addDaysUtc, dateOnlyLocal, todayUtc } from "@/lib/date";
+import { addDaysUtc, dateOnlyLocal, startOfWeekUtc, todayUtc } from "@/lib/date";
 import { formatDayOfMonth, formatLocalDayMonth } from "@/lib/format/date";
+import { dateOnlyToIsoDay, isoDayToDateOnly } from "@/lib/planner/server";
+import { shiftIsoDay } from "@/lib/study/schedule";
+import {
+  ensureSeriesSchedule,
+  serialiseSeries,
+  serialiseSession,
+  studySeriesSelect,
+  studySessionSelect,
+} from "@/lib/study/server";
 import { cn } from "@/lib/utils";
 
 export const dynamic = "force-dynamic";
@@ -15,16 +28,24 @@ export const dynamic = "force-dynamic";
 /**
  * Study.
  *
- * Same shape as Fitness — a lens over habits categorised as STUDY — but the
- * interesting number here is one the user cannot get from the habit grid at all:
- * **focus actually spent on study tasks**.
+ * Two halves, and they answer different questions.
  *
- * That figure comes from `FocusSession`, joined through the session's task to the
- * task's category, rather than from the habit log. A timer is self-reported and
- * easy to skip, whereas a finished focus session has a start, an end, and actual
- * elapsed seconds, so it is the more honest measure of hours on a book. It also
- * catches study done inside a task ("Revise chapter 4") that nobody ever made a
- * habit for.
+ * The **weekly schedule** is the plan: what the user intends to study, when,
+ * and how often. It lives in `StudySeries` (the rule) and `StudySession` (the
+ * concrete days), and it is the half that a user can act on before any work has
+ * happened.
+ *
+ * The **focus figures** are the record: what actually happened. They come from
+ * `FocusSession`, joined through the session's task to the task's category,
+ * rather than from the habit log. A timer is self-reported and easy to skip,
+ * whereas a finished focus session has a start, an end, and actual elapsed
+ * seconds, so it is the more honest measure of hours on a book. It also catches
+ * study done inside a task ("Revise chapter 4") that nobody ever made a habit
+ * for.
+ *
+ * The two are deliberately never merged into one number. "I planned 60 minutes
+ * and did 35" is the sentence the study screen exists to be able to say, and
+ * blending the two would destroy it.
  *
  * `FocusSession.taskId` is nullable and set to null on task delete, so those
  * minutes are genuinely unavailable rather than merely undiscovered. That is
@@ -33,10 +54,27 @@ export const dynamic = "force-dynamic";
 
 const HISTORY_DAYS = 14;
 const WINDOW_DAYS = 7;
+const ISO_DAY = /^\d{4}-\d{2}-\d{2}$/;
 
-export default async function StudyPage() {
+export default async function StudyPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ week?: string }>;
+}) {
   const user = await requireUser();
+  const { week } = await searchParams;
+  const weekParam = week && ISO_DAY.test(week) ? week : undefined;
   const today = todayUtc();
+
+  // The timetable is a week at a time. The requested week is snapped to its
+  // Monday, so a link to "the 3rd" shows the week containing the 3rd rather
+  // than seven days starting on the 3rd.
+  const weekStartDate = weekParam
+    ? startOfWeekUtc(isoDayToDateOnly(weekParam))
+    : startOfWeekUtc(today);
+  const weekStartIso = dateOnlyToIsoDay(weekStartDate);
+  const weekEndIso = shiftIsoDay(weekStartIso, 6);
+
   const historyStart = addDaysUtc(today, -(HISTORY_DAYS - 1));
   const windowStart = addDaysUtc(today, -(WINDOW_DAYS - 1));
   const planEnd = addDaysUtc(today, WINDOW_DAYS);
@@ -77,24 +115,70 @@ export default async function StudyPage() {
   const taskIds = studyTaskIds.map((t) => t.id);
   const habitIds = habits.map((h) => h.id);
 
+  /**
+   * The timetable.
+   *
+   * `ensureSeriesSchedule` runs first and is the only thing here that writes:
+   * it extends every active series' materialised days up to the rolling
+   * horizon, so a rule created last month still has next month's days on it.
+   * It is idempotent, so running it on every read costs nothing once the
+   * horizon has been reached.
+   */
+  await ensureSeriesSchedule(user.id);
+
+  const [weekSessions, allSeries, habitOptions] = await Promise.all([
+    prisma.studySession.findMany({
+      where: {
+        userId: user.id,
+        date: {
+          gte: isoDayToDateOnly(weekStartIso),
+          lte: isoDayToDateOnly(weekEndIso),
+        },
+      },
+      orderBy: [{ date: "asc" }, { startMinutes: "asc" }],
+      select: studySessionSelect,
+    }),
+    prisma.studySeries.findMany({
+      where: { userId: user.id },
+      orderBy: [{ isActive: "desc" }, { createdAt: "asc" }],
+      select: studySeriesSelect,
+    }),
+    // Every active habit, not just the study ones: a session can feed any
+    // habit, and the study-category filter would hide the rest of them.
+    prisma.habit.findMany({
+      where: { userId: user.id, isActive: true },
+      orderBy: { name: "asc" },
+      select: { id: true, name: true, type: true, targetValue: true },
+    }),
+  ]);
+
+  const scheduleSessions = weekSessions.map(serialiseSession);
+  const scheduleSeries: StudySeriesView[] = allSeries.map((one) => serialiseSeries(one));
+
   const [sessions, orphanFocus, upcomingTasks, plannedBlocks] = await Promise.all([
-    taskIds.length
-      ? prisma.focusSession.findMany({
-          where: {
-            userId: user.id,
-            taskId: { in: taskIds },
-            startedAt: { gte: focusStart },
-            endedAt: { not: null },
-          },
-          select: { startedAt: true, actualSeconds: true, rating: true, taskId: true },
-        })
-      : Promise.resolve([]),
-    // Focus with no task at all. Reported as a caveat rather than mixed in,
-    // because unattributed minutes cannot honestly be called study.
+    // Study time reaches this page two ways: a focus session against a study
+    // task, or a timer started from a timetable entry (which has a study
+    // session but no task). Both are genuinely study, so both count.
+    prisma.focusSession.findMany({
+      where: {
+        userId: user.id,
+        OR: [
+          ...(taskIds.length ? [{ taskId: { in: taskIds } }] : []),
+          { studySessionId: { not: null } },
+        ],
+        startedAt: { gte: focusStart },
+        endedAt: { not: null },
+      },
+      select: { startedAt: true, actualSeconds: true, rating: true, taskId: true },
+    }),
+    // Focus with neither a task nor a study session. Reported as a caveat
+    // rather than mixed in, because unattributed minutes cannot honestly be
+    // called study.
     prisma.focusSession.aggregate({
       where: {
         userId: user.id,
         taskId: null,
+        studySessionId: null,
         startedAt: { gte: focusStart },
         endedAt: { not: null },
       },
@@ -212,6 +296,14 @@ export default async function StudyPage() {
         </p>
       </header>
 
+      <WeeklySchedule
+        weekStart={weekStartIso}
+        sessions={scheduleSessions}
+        series={scheduleSeries}
+        habits={habitOptions}
+        today={dateOnlyToIsoDay(today)}
+      />
+
       <div className="grid gap-4 lg:grid-cols-[1.6fr_1fr]">
         <Card>
           <CardHeader>
@@ -232,10 +324,10 @@ export default async function StudyPage() {
               />
             </dl>
             <p className="text-[11px] leading-relaxed text-ink-subtle">
-              Measured from finished focus sessions against tasks in a study
-              category, using elapsed time rather than planned time.
+              Measured from finished focus sessions against a study task or a
+              timetable session, using elapsed time rather than planned time.
               {orphanMinutes > 0
-                ? ` A further ${orphanMinutes} min of focus in the last ${HISTORY_DAYS} days had no task attached and is excluded rather than guessed at.`
+                ? ` A further ${orphanMinutes} min of focus in the last ${HISTORY_DAYS} days had no task or session attached and is excluded rather than guessed at.`
                 : ""}
             </p>
           </CardContent>
@@ -305,8 +397,9 @@ export default async function StudyPage() {
       {habits.length === 0 && taskIds.length === 0 ? (
         <p className="flex items-center gap-2 text-[11px] text-ink-subtle">
           <GraduationCap className="size-3.5" />
-          Study minutes come from focus sessions on study tasks, so a study task
-          and a focus timer is enough to get a number here.
+          Study minutes come from focus sessions on study tasks or timetable
+          sessions, so either a study task or a Start from the schedule is
+          enough to get a number here.
         </p>
       ) : null}
     </div>

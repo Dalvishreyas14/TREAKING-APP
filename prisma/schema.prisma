@@ -142,6 +142,46 @@ enum FocusType {
   DEEP_WORK
 }
 
+enum MuscleGroup {
+  CHEST
+  BACK
+  SHOULDERS
+  ARMS
+  CORE
+  LEGS
+  GLUTES
+  FULL_BODY
+  CARDIO
+  OTHER
+}
+
+/**
+ * The lifecycle of a workout.
+ * The PLANNED vs COMPLETED distinction is load-bearing: a PLANNED workout must
+ * never be counted as training volume or completed sessions, so every aggregate
+ * query filters on this rather than treating "a Workout row exists" as "it was
+ * done".
+ * The weekly planner adds three states to that pair, because "I did not do the
+ * session I planned" has more than one honest shape:
+ * - IN_PROGRESS is a session the user has started but not yet finished. It is
+ * still not history, so it counts the same as PLANNED for every completed
+ * figure, but the UI can show it as live.
+ * - SKIPPED is a deliberate no-show. It is terminal and, importantly, distinct
+ * from deleting: "I skipped Wednesday" is a fact about adherence, whereas a
+ * deleted row is a plan that never existed.
+ * - RESCHEDULED is terminal, recorded on the *original* slot when a session is
+ * moved. The moved copy is a fresh PLANNED row, so the original keeps its
+ * date and the history shows that the slot was not simply dropped.
+ * Only COMPLETED counts as done. Every other value is explicitly not-done.
+ */
+enum WorkoutStatus {
+  PLANNED
+  IN_PROGRESS
+  COMPLETED
+  SKIPPED
+  RESCHEDULED
+}
+
 enum InsightKind {
   CORRELATION
   PATTERN
@@ -203,7 +243,6 @@ enum WeeklyPlanCategory {
 
 /**
  * Which quantity the plan's target is denominated in.
- *
  * `HOURS` is the honest default because it is the one measure that is genuinely
  * available: focus sessions carry `actualSeconds`. `SESSIONS` exists for plans
  * like a five-day gym week, where the meaningful count is completed habit logs
@@ -228,6 +267,40 @@ enum CalendarSource {
   LOCAL
   GOOGLE
   OUTLOOK
+}
+
+/**
+ * How often a study series repeats.
+ * `NONE` is deliberately a member of the enum rather than the absence of a
+ * series. A one-off session and a recurring series need the same editing,
+ * rescheduling and history semantics, and modelling "does not repeat" as "no
+ * series row" would mean every read path had to branch on whether the relation
+ * happened to be null before it could say anything at all.
+ */
+enum StudyRepeat {
+  NONE
+  WEEKLY
+  CUSTOM
+}
+
+/**
+ * The lifecycle of a scheduled study session.
+ * The distinction that matters is the same one the fitness log makes: a session
+ * that was *planned* is not a session that was *done*. `PLANNED` covers both
+ * sessions still in the future and sessions whose slot has passed untouched -
+ * the UI tells those two apart by looking at the clock, not by inventing a
+ * fifth stored state that would have to be written by a background job nobody
+ * runs. `MISSED` is therefore recorded only when the user says so.
+ * `RESCHEDULED` is terminal and sits on the *original* slot when a session is
+ * moved; the moved copy is a fresh `PLANNED` row, so the week can say "moved
+ * here from Tuesday" and the history keeps the fact that Tuesday was given up.
+ */
+enum StudySessionStatus {
+  PLANNED
+  IN_PROGRESS
+  COMPLETED
+  MISSED
+  RESCHEDULED
 }
 
 enum AchievementRarity {
@@ -256,7 +329,7 @@ model User {
   image         String?
   role          UserRole  @default(USER)
 
-  onboardedAt DateTime?
+  onboardedAt       DateTime?
   /**
    * When the password was last set. Compared against the `pwd` claim on the
    * session JWT so a password reset invalidates already-issued sessions.
@@ -264,9 +337,9 @@ model User {
    * is the only thing that makes a reset actually terminate access.
    */
   passwordChangedAt DateTime?
-  theme ThemePreference @default(SYSTEM)
-  timezone    String          @default("UTC")
-  locale      String          @default("en")
+  theme             ThemePreference @default(SYSTEM)
+  timezone          String          @default("UTC")
+  locale            String          @default("en")
 
   // User-controlled AI settings. aiConsentAt gates any use of an external LLM provider.
   aiEnabled        Boolean   @default(true)
@@ -310,10 +383,13 @@ model User {
   reminders           Reminder[]
   calendarEvents      CalendarEvent[]
   calendarConnections CalendarConnection[]
-  notes               Note[]
-  resources           Resource[]
   weeklyPlans         WeeklyPlan[]
   weeklyPlanTemplates WeeklyPlanTemplate[]
+  exercises           Exercise[]
+  workouts            Workout[]
+  workoutRoutines     WorkoutRoutine[]
+  studySeries         StudySeries[]
+  studySessions       StudySession[]
 
   @@index([createdAt])
 }
@@ -374,7 +450,6 @@ model PasswordResetToken {
 /**
  * Email verification uses the same opaque-token design as PasswordResetToken:
  * only a SHA-256 digest is stored, so a database leak yields no usable links.
- *
  * The Auth.js `VerificationToken` model is intentionally left to the adapter
  * for OAuth; our own flows do not use it.
  */
@@ -446,13 +521,14 @@ model Category {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  user         User?         @relation(fields: [userId], references: [id], onDelete: Cascade)
-  tasks        Task[]
-  habits       Habit[]
-  goals        Goal[]
-  routineItems RoutineItem[]
-  notes        Note[]
-  resources    Resource[]
+  user          User?          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tasks         Task[]
+  habits        Habit[]
+  goals         Goal[]
+  routineItems  RoutineItem[]
+  workouts      Workout[]
+  studySeries   StudySeries[]
+  studySessions StudySession[]
 
   @@unique([userId, slug])
   @@index([kind])
@@ -528,20 +604,18 @@ model Task {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  user          User           @relation(fields: [userId], references: [id], onDelete: Cascade)
-  category      Category?      @relation(fields: [categoryId], references: [id], onDelete: SetNull)
-  goal          Goal?          @relation(fields: [goalId], references: [id], onDelete: SetNull)
-  goalMilestone GoalMilestone? @relation(fields: [goalMilestoneId], references: [id], onDelete: SetNull)
-  parent        Task?          @relation("TaskSubtasks", fields: [parentId], references: [id], onDelete: Cascade)
-  subtasks      Task[]         @relation("TaskSubtasks")
-  routineItems  RoutineItem[]
-  // Named to match the Note side; Task has its own `notes` text column.
-  knowledge     Note[]         @relation("TaskKnowledge")
-  tags          TaskTag[]
-  projectLinks  ProjectTask[]
+  user            User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  category        Category?        @relation(fields: [categoryId], references: [id], onDelete: SetNull)
+  goal            Goal?            @relation(fields: [goalId], references: [id], onDelete: SetNull)
+  goalMilestone   GoalMilestone?   @relation(fields: [goalMilestoneId], references: [id], onDelete: SetNull)
+  parent          Task?            @relation("TaskSubtasks", fields: [parentId], references: [id], onDelete: Cascade)
+  subtasks        Task[]           @relation("TaskSubtasks")
+  routineItems    RoutineItem[]
+  tags            TaskTag[]
+  projectLinks    ProjectTask[]
   weeklyPlanLinks WeeklyPlanTask[]
-  timeBlocks    TimeBlock[]
-  focusSessions FocusSession[]
+  timeBlocks      TimeBlock[]
+  focusSessions   FocusSession[]
 
   @@index([userId, status])
   @@index([userId, dueAt])
@@ -573,14 +647,12 @@ model Project {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  user       User               @relation(fields: [userId], references: [id], onDelete: Cascade)
-  goal       Goal?              @relation(fields: [goalId], references: [id], onDelete: SetNull)
-  tasks      ProjectTask[]
-  milestones ProjectMilestone[]
+  user          User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+  goal          Goal?              @relation(fields: [goalId], references: [id], onDelete: SetNull)
+  tasks         ProjectTask[]
+  milestones    ProjectMilestone[]
   focusSessions FocusSession[]
-  weeklyPlans WeeklyPlan[]
-  notes      Note[]
-  resources  Resource[]
+  weeklyPlans   WeeklyPlan[]
 
   @@index([userId, status])
   @@index([userId, dueAt])
@@ -661,14 +733,27 @@ model Habit {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  user         User            @relation(fields: [userId], references: [id], onDelete: Cascade)
-  category     Category?       @relation(fields: [categoryId], references: [id], onDelete: SetNull)
-  goal         Goal?           @relation(fields: [goalId], references: [id], onDelete: SetNull)
-  schedule     HabitSchedule[]
-  logs         HabitLog[]
-  routineItems RoutineItem[]
-  timeBlocks   TimeBlock[]
+  user            User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  category        Category?         @relation(fields: [categoryId], references: [id], onDelete: SetNull)
+  goal            Goal?             @relation(fields: [goalId], references: [id], onDelete: SetNull)
+  schedule        HabitSchedule[]
+  logs            HabitLog[]
+  routineItems    RoutineItem[]
+  timeBlocks      TimeBlock[]
   weeklyPlanLinks WeeklyPlanHabit[]
+  /**
+   * Workouts that contribute to this habit. Completing such a workout logs the
+   * habit for the day, so a live training session can keep a "Gym" streak alive
+   * without the user logging the same effort twice by hand.
+   */
+  workouts        Workout[]
+  /**
+   * Study sessions that feed this habit. A scheduled session can log the habit
+   * when it is finished, but only under the habit's own completion rules - the
+   * session never decides on its own that the habit is done.
+   */
+  studySeries     StudySeries[]
+  studySessions   StudySession[]
 
   @@index([userId, isActive])
   @@index([userId, startDate])
@@ -695,15 +780,43 @@ model HabitLog {
   completed Boolean  @default(false)
   note      String?
 
+  /**
+   * The workout that auto-logged this row, when one did.
+   * Nullable and SetNull, and it is the double-count guard. When completing a
+   * workout that is linked to a habit, the app writes a habit log so the streak
+   * and dashboard see the session; the fitness page's "minutes trained" figure
+   * then excludes any habit log carrying a `workoutId`, because the workout's
+   * own `minutes` already represents that session. A log the user wrote by hand
+   * has this null and still counts as its own activity.
+   */
+  workoutId String?
+
+  /**
+   * The scheduled study session that auto-logged this row, when one did.
+   * The same double-count guard as `workoutId`, for the same reason: a
+   * timetable session that feeds a habit writes the habit log so the streak and
+   * the dashboard see the work, and the study page's own "minutes focused"
+   * figure then excludes any log carrying a `studySessionId`, because the
+   * session's own `actualMinutes` already represents that time.
+   * It is also what makes finishing a session idempotent. Without it, finishing
+   * the same session twice would write two logs and the habit would be credited
+   * twice for one evening's work.
+   */
+  studySessionId String?
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  user  User  @relation(fields: [userId], references: [id], onDelete: Cascade)
-  habit Habit @relation(fields: [habitId], references: [id], onDelete: Cascade)
+  user         User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  habit        Habit         @relation(fields: [habitId], references: [id], onDelete: Cascade)
+  workout      Workout?      @relation(fields: [workoutId], references: [id], onDelete: SetNull)
+  studySession StudySession? @relation(fields: [studySessionId], references: [id], onDelete: SetNull)
 
   @@unique([habitId, date])
   @@index([userId, date])
   @@index([userId, completed])
+  @@index([workoutId])
+  @@index([studySessionId])
 }
 
 // ---------------------------------------------------------------------------
@@ -732,17 +845,16 @@ model Goal {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  user       User            @relation(fields: [userId], references: [id], onDelete: Cascade)
-  category   Category?       @relation(fields: [categoryId], references: [id], onDelete: SetNull)
-  categoryId String?
-  milestones GoalMilestone[]
-  checkIns   GoalCheckIn[]
-  tasks      Task[]
-  habits     Habit[]
-  projects   Project[]
+  user        User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  category    Category?       @relation(fields: [categoryId], references: [id], onDelete: SetNull)
+  categoryId  String?
+  milestones  GoalMilestone[]
+  checkIns    GoalCheckIn[]
+  tasks       Task[]
+  habits      Habit[]
+  projects    Project[]
   weeklyPlans WeeklyPlan[]
-  notes      Note[]
-  resources  Resource[]
+  workouts    Workout[]
 
   @@index([userId, status])
   @@index([userId, targetDate])
@@ -787,14 +899,12 @@ model GoalCheckIn {
 /**
  * A plan is an intention scoped to seven days, and the *only* thing it adds to the
  * existing model is that span.
- *
  * Goals, Tasks, Habits and TimeBlocks already existed and already work. What none
  * of them could express was "this set of tasks is what I intend to do *this
  * week*", which is the unit a person actually reviews on a Sunday. So a plan owns
  * links and dates; it never owns copies of the work itself. Deleting a plan must
  * never delete a task the user also has on their task list, which is why
  * `WeeklyPlanTask` is a join and not a copy.
- *
  * `startDate`/`endDate` are `@db.Date` UTC midnight, matching `TimeBlock.date`,
  * `HabitLog.date` and `WeeklyReview.weekStart`. A plan is a seven-day window but
  * the columns are not constrained to seven: a user planning a fortnight should be
@@ -811,10 +921,8 @@ model WeeklyPlan {
   /**
    * What the target is measured in, and what "actual" is therefore counted
    * against.
-   *
    * `HOURS` sums `FocusSession.actualSeconds`. `TASKS` counts completed linked
    * tasks. `COUNT` is user-reported and carries no automatic measurement at all.
-   *
    * `SESSIONS` is the one target whose source depends on `category`, because
    * "session" is not one thing. A fitness week's sessions are completed `HabitLog`
    * rows on its linked habits, matching how `fitness/page.tsx` already counts. A
@@ -829,12 +937,10 @@ model WeeklyPlan {
 
   /**
    * The user's own progress figure, used only by a `COUNT` plan.
-   *
    * Nullable rather than defaulted to 0 on purpose: 0 is a claim ("you have done
    * none of this") and null is an admission ("I have not counted yet"). The
    * progress function treats them differently, because a plan nobody has got to
    * yet should not read as a plan that failed.
-   *
    * Only ever read when `targetType` is `COUNT`. The other three target types are
    * measured from `FocusSession`, `HabitLog` and `Task`, all of which are written
    * by shipped code paths, so a number stored here would be a second source of
@@ -844,8 +950,8 @@ model WeeklyPlan {
 
   status WeeklyPlanStatus @default(ACTIVE)
 
-  startDate DateTime  @db.Date
-  endDate   DateTime  @db.Date
+  startDate DateTime @db.Date
+  endDate   DateTime @db.Date
 
   // Both optional and both SetNull. A goal or project deleted underneath a plan
   // should leave the plan standing - the work was still intended, it just lost its
@@ -856,12 +962,12 @@ model WeeklyPlan {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  user       User              @relation(fields: [userId], references: [id], onDelete: Cascade)
-  goal       Goal?             @relation(fields: [goalId], references: [id], onDelete: SetNull)
-  project    Project?          @relation(fields: [projectId], references: [id], onDelete: SetNull)
-  tasks  WeeklyPlanTask[]
-  habits WeeklyPlanHabit[]
-  days   WeeklyPlanDay[]
+  user    User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  goal    Goal?             @relation(fields: [goalId], references: [id], onDelete: SetNull)
+  project Project?          @relation(fields: [projectId], references: [id], onDelete: SetNull)
+  tasks   WeeklyPlanTask[]
+  habits  WeeklyPlanHabit[]
+  days    WeeklyPlanDay[]
 
   @@index([userId, startDate])
   @@index([userId, status])
@@ -871,7 +977,6 @@ model WeeklyPlan {
 
 /**
  * Join row, composite-PK style, mirroring `ProjectTask`.
- *
  * A task can sit in several plans across different weeks without contradiction -
  * "Revise chapter 4" is plausibly next week's job too. That is why this is not
  * unique on `taskId` alone, and it is also why copy-to-next-week cannot simply
@@ -881,25 +986,23 @@ model WeeklyPlan {
 model WeeklyPlanTask {
   weeklyPlanId String
   taskId       String
-  sortOrder    Int      @default(0)
+  sortOrder    Int    @default(0)
 
   /**
    * Which weekday this task is intended for: 0 = Sunday .. 6 = Saturday, matching
    * `Date.getDay()` and the same convention as `WeeklyPlanDay.dayOfWeek`.
-   *
    * Nullable on purpose. A task that belongs to the week without being pinned to a
    * particular day is a real state — "finish the chapter, whenever it fits" — and
    * forcing a day would invent a commitment the user never made. Rows written before
    * this column existed read null and are shown in an unscheduled strip rather than
    * being backfilled with a guess dressed up as a fact.
-   *
    * Intentionally *not* part of the composite key: the same task can be pinned to a
    * day in one plan and left floating in another without contradiction, exactly as it
    * can appear in several plans' weeks.
    */
   dayOfWeek Int?
 
-  addedAt      DateTime @default(now())
+  addedAt DateTime @default(now())
 
   weeklyPlan WeeklyPlan @relation(fields: [weeklyPlanId], references: [id], onDelete: Cascade)
   task       Task       @relation(fields: [taskId], references: [id], onDelete: Cascade)
@@ -910,11 +1013,13 @@ model WeeklyPlanTask {
 
 /**
  * Fitness and study plans link *existing* habits rather than inventing their own.
- *
- * This is the reason there is no `Workout` or `StudySession` table in this schema.
- * `fitness/page.tsx` and `study/page.tsx` are already lenses over habits filtered
- * by `Category.kind`, and a second table would be a second source of truth for the
- * same fact. A plan pointed at "Gym" counts the logs on that habit.
+ * This is why there is no `StudySession` table in this schema. `study/page.tsx`
+ * is a lens over habits filtered by `Category.kind`. Fitness gained its own
+ * `Workout` table once structured sessions (exercises, sets, reps, weight) turned
+ * out to be more than a habit row could hold, but a fitness plan still counts the
+ * logs on its linked habits, and a workout that targets a habit writes the log
+ * rather than the plan reaching into the workout. A plan pointed at "Gym" counts
+ * the logs on that habit.
  */
 model WeeklyPlanHabit {
   weeklyPlanId String
@@ -930,7 +1035,6 @@ model WeeklyPlanHabit {
 
 /**
  * What the plan intends on each weekday, including the days it intends to rest.
- *
  * This table exists for the rest days. "Wednesday: Rest" and "Sunday: Recovery"
  * are real content in a five-day gym plan, and absence cannot represent them: a
  * plan with rows for Mon/Tue/Thu/Sat is indistinguishable from one where the user
@@ -938,9 +1042,11 @@ model WeeklyPlanHabit {
  * different and honest claim.
  */
 model WeeklyPlanDay {
-  id           String @id @default(cuid())
+  id           String  @id @default(cuid())
   weeklyPlanId String
-  /** 0 = Sunday .. 6 = Saturday, matching `Date.getDay()` and JS convention. */
+  /**
+   * 0 = Sunday .. 6 = Saturday, matching `Date.getDay()` and JS convention.
+   */
   dayOfWeek    Int
   note         String?
 
@@ -952,7 +1058,6 @@ model WeeklyPlanDay {
 
 /**
  * A reusable plan shape.
- *
  * `configuration` holds per-day task *titles* and nothing else - no task ids, no
  * habit ids. That is the whole design constraint. A template that remembered which
  * tasks it pointed at would rot silently the first time a task was deleted, and
@@ -964,8 +1069,8 @@ model WeeklyPlanTemplate {
   id     String @id @default(cuid())
   userId String
 
-  name        String
-  category    WeeklyPlanCategory @default(CUSTOM)
+  name          String
+  category      WeeklyPlanCategory @default(CUSTOM)
   configuration Json
 
   createdAt DateTime @default(now())
@@ -974,6 +1079,210 @@ model WeeklyPlanTemplate {
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([userId, createdAt])
+}
+
+// ---------------------------------------------------------------------------
+// Study timetable
+// ---------------------------------------------------------------------------
+
+/**
+ * The recurring rule behind a study session.
+ * A series is the *plan*: one subject, one time of day, and the set of weekdays
+ * it happens on. It is kept apart from the sessions it produces for the same
+ * reason `WorkoutRoutine` is kept apart from `Workout` - a template that
+ * remembered its own history would rot the first time a session was skipped or
+ * completed, and the failure would surface as a timetable that quietly shows
+ * one more session than the user actually did.
+ * So the rule lives here and the occurrences live in `StudySession`. Editing a
+ * series rewrites the future occurrences it owns; editing one occurrence
+ * detaches it from the series for that day alone. Completed sessions are never
+ * rewritten by either.
+ */
+model StudySeries {
+  id     String @id @default(cuid())
+  userId String
+
+  title   String
+  subject String
+  notes   String?
+  color   String  @default("#C8F751")
+
+  /**
+   * `NONE` is not a value a series is normally created with - a one-off session
+   * is a plain `StudySession` with no series - but the enum carries it so a
+   * series can be paused into "does not repeat any more" without the row
+   * becoming meaningless.
+   */
+  repeat StudyRepeat @default(WEEKLY)
+
+  /**
+   * The weekdays this series happens on, as JS day indices: 0 = Sunday ..
+   * 6 = Saturday.
+   * Matches `HabitSchedule.dayOfWeek`, `WeeklyPlanDay.dayOfWeek` and
+   * `WeeklyPlanTask.dayOfWeek`, all of which use the JS convention. The study
+   * timetable links to habits and to weekly plans, and a table that disagreed
+   * with its three neighbours about what "Monday" means would be a permanent
+   * source of off-by-one bugs. `WorkoutRoutineDay.weekday` disagrees, and that
+   * is a separate feature with its own constant to read.
+   * `WEEKLY` series carry exactly one day here; `CUSTOM` series carry any
+   * number. The array is the single source of truth in both cases - `repeat`
+   * only decides how the UI describes it.
+   */
+  daysOfWeek Int[] @default([])
+
+  /**
+   * Minutes from local midnight. Local wall-clock rather than an instant,
+   * because a session belongs to a slot on the user's own clock and the whole
+   * point of "Monday 7pm" is that it stays 7pm.
+   */
+  startMinutes    Int
+  durationMinutes Int
+
+  reminderLeadMinutes Int?
+
+  /**
+   * The habit this session feeds, if any. Completing the session writes a log
+   * against that habit under the habit's own completion rules - it never
+   * invents one. `StudySession.habitId` copies this so a series edit can move
+   * the link without rewriting history.
+   */
+  habitId    String?
+  categoryId String?
+
+  isActive Boolean @default(true)
+
+  /**
+   * The last day this series has had sessions materialised for.
+   * The same rolling-horizon trick `WorkoutRoutine.generatedThrough` uses: only
+   * days after this one are ever filled, so a session the user deleted is not
+   * silently recreated the next time the page loads.
+   */
+  generatedThrough DateTime? @db.Date
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user     User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  habit    Habit?            @relation(fields: [habitId], references: [id], onDelete: SetNull)
+  category Category?         @relation(fields: [categoryId], references: [id], onDelete: SetNull)
+  sessions StudySession[]
+  skips    StudySeriesSkip[]
+
+  @@index([userId, isActive])
+  @@index([userId, createdAt])
+  @@index([habitId])
+}
+
+/**
+ * One scheduled study session on one day.
+ * A session is either a one-off (`seriesId` null) or an occurrence of a series.
+ * Both are rows, because both need the same treatment downstream: a status, a
+ * place in the week, a link to a habit, and the ability to be started against
+ * the focus timer.
+ * `durationMinutes` is stored rather than an end time. The end of a session is
+ * a consequence of its start and its length, and storing it separately would
+ * allow the two to disagree - a session that claims to run for an hour and
+ * ends before it starts.
+ */
+model StudySession {
+  id     String @id @default(cuid())
+  userId String
+
+  seriesId String?
+
+  title   String
+  subject String
+  notes   String?
+  color   String  @default("#C8F751")
+
+  /**
+   * The calendar day, as `@db.Date` (UTC midnight).
+   */
+  date            DateTime @db.Date
+  startMinutes    Int
+  durationMinutes Int
+
+  status StudySessionStatus @default(PLANNED)
+
+  /**
+   * Minutes actually focused against this session.
+   * Always zero until a focus timer is attached and finished. Scheduled time is
+   * never copied into this column: "I planned 60 minutes and did 35" has to stay
+   * two different numbers, or the difference between a plan and an achievement
+   * stops existing.
+   */
+  actualMinutes Int @default(0)
+
+  reminderLeadMinutes Int?
+
+  habitId    String?
+  categoryId String?
+
+  /**
+   * True when this occurrence was edited on its own, away from its series.
+   * A series edit rewrites the future occurrences it owns, but must not clobber
+   * a day the user deliberately changed. This flag is what makes "edit this
+   * session" and "edit the whole series" different operations on the same data.
+   */
+  isException Boolean @default(false)
+
+  startedAt   DateTime?
+  completedAt DateTime?
+
+  /**
+   * On a rescheduled copy, the day it was moved from. This is the link between
+   * the terminal `RESCHEDULED` original and its replacement, and it is what lets
+   * the week say "moved here from Tuesday" without deleting the original's
+   * history.
+   */
+  rescheduledFromDate DateTime? @db.Date
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user          User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  series        StudySeries?   @relation(fields: [seriesId], references: [id], onDelete: Cascade)
+  habit         Habit?         @relation(fields: [habitId], references: [id], onDelete: SetNull)
+  category      Category?      @relation(fields: [categoryId], references: [id], onDelete: SetNull)
+  focusSessions FocusSession[]
+  habitLogs     HabitLog[]
+
+  /**
+   * One occurrence per series per day.
+   * Postgres treats NULLs as distinct, so the rows with no series - the
+   * one-off sessions - are not constrained by this at all, which is exactly
+   * right: two one-off sessions on the same day are two sessions, not a
+   * duplicate. For series-owned rows the constraint is the database-level
+   * guarantee that generation can never write the same day twice.
+   */
+  @@unique([seriesId, date])
+  @@index([userId, date])
+  @@index([userId, status])
+  @@index([seriesId])
+  @@index([habitId])
+}
+
+/**
+ * A day on a series that must never get a session again.
+ * Deleting one occurrence of a recurring series cannot simply delete the row,
+ * because the next generation pass would put it straight back - the user would
+ * delete the same Tuesday for ever. This is the tombstone that says "not on this
+ * day", and it is checked before a session is created.
+ * Separate from the session table on purpose: a tombstone outlives the row it
+ * replaced, and folding the two together would mean the row had to be kept
+ * around just to remember that it is not supposed to exist.
+ */
+model StudySeriesSkip {
+  id       String   @id @default(cuid())
+  seriesId String
+  date     DateTime @db.Date
+
+  createdAt DateTime @default(now())
+
+  series StudySeries @relation(fields: [seriesId], references: [id], onDelete: Cascade)
+
+  @@unique([seriesId, date])
+  @@index([seriesId])
 }
 
 // ---------------------------------------------------------------------------
@@ -1015,7 +1324,7 @@ model RoutineItem {
   // Whether running this step should give the user a task for it. Separate from
   // `taskId` because `taskId` records *which* task once one exists, and a step
   // that has never been run has no task to point at yet.
-  createsTask Boolean @default(true)
+  createsTask      Boolean @default(true)
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -1066,6 +1375,7 @@ model TimeBlock {
   habitId         String?
   routineId       String?
   calendarEventId String?
+  workoutId       String?
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -1075,6 +1385,7 @@ model TimeBlock {
   habit         Habit?         @relation(fields: [habitId], references: [id], onDelete: Cascade)
   routine       Routine?       @relation(fields: [routineId], references: [id], onDelete: SetNull)
   calendarEvent CalendarEvent? @relation(fields: [calendarEventId], references: [id], onDelete: Cascade)
+  workout       Workout?       @relation(fields: [workoutId], references: [id], onDelete: Cascade)
 
   @@index([userId, date])
   @@index([userId, startAt, endAt])
@@ -1096,118 +1407,44 @@ model FocusSession {
   endedEarly     Boolean   @default(false)
   xpAwarded      Int       @default(0)
 
+  /**
+   * The scheduled study session this timer is running against, if any.
+   * This is what makes "Start Studying" on a timetable entry more than a
+   * button that opens a timer: the focus session carries the subject and the
+   * planned length, and finishing it writes the *actual* minutes back to the
+   * study session. A timer started from the Focus page has no study session and
+   * behaves exactly as it always did.
+   */
+  studySessionId String?
+
+  /**
+   * When the timer was paused, and how much time it has spent paused.
+   * Elapsed focus time is derived from server-stamped instants, never from a
+   * client-side counter, so a pause has to be recorded on the server too -
+   * otherwise a paused timer would keep accruing focus time while the user
+   * was away from the desk, and the study session would report minutes that
+   * were never spent studying.
+   * `pausedSeconds` accumulates the time already excluded, and `pausedAt` is
+   * the instant the current pause began. A session that was never paused has
+   * both at their defaults, so the arithmetic for every existing session is
+   * unchanged.
+   */
+  pausedAt      DateTime?
+  pausedSeconds Int       @default(0)
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  user    User?    @relation(fields: [userId], references: [id], onDelete: Cascade)
-  task    Task?    @relation(fields: [taskId], references: [id], onDelete: SetNull)
-  project Project? @relation(fields: [projectId], references: [id], onDelete: SetNull)
+  user         User?         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  task         Task?         @relation(fields: [taskId], references: [id], onDelete: SetNull)
+  project      Project?      @relation(fields: [projectId], references: [id], onDelete: SetNull)
+  studySession StudySession? @relation(fields: [studySessionId], references: [id], onDelete: SetNull)
 
   @@index([userId, startedAt])
   @@index([userId, endedAt])
   @@index([taskId])
   @@index([projectId])
-}
-
-// ---------------------------------------------------------------------------
-// Knowledge
-//
-// A note is freeform writing; a resource is something you consume (a book, a
-// course, an article). Both are the only models that carry knowledge rather than
-// activity, and both are linkable back into the hierarchy so a note found while
-// studying a goal can point at the goal it came from.
-// ---------------------------------------------------------------------------
-
-model Note {
-  id     String  @id @default(cuid())
-  userId String
-  title  String
-  body   String  @default("")
-  pinned Boolean @default(false)
-
-  // A note usually belongs to one piece of work, but a note is allowed to be
-  // loose, so every link is optional and detaching never destroys the note.
-  // `resourceId` covers highlights and quotes pulled out of something being read.
-  taskId     String?
-  goalId     String?
-  projectId  String?
-  categoryId String?
-  resourceId String?
-
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-
-  user     User      @relation(fields: [userId], references: [id], onDelete: Cascade)
-  // Named because Task already has a `notes` text column; the Task side calls
-  // this relation `knowledge` so both models stay readable.
-  task     Task?     @relation("TaskKnowledge", fields: [taskId], references: [id], onDelete: SetNull)
-  goal     Goal?     @relation(fields: [goalId], references: [id], onDelete: SetNull)
-  project  Project?  @relation(fields: [projectId], references: [id], onDelete: SetNull)
-  category Category? @relation(fields: [categoryId], references: [id], onDelete: SetNull)
-  resource Resource? @relation(fields: [resourceId], references: [id], onDelete: SetNull)
-
-  @@index([userId, updatedAt])
-  @@index([userId, pinned])
-  @@index([resourceId])
-  @@index([taskId])
-  @@index([goalId])
-  @@index([projectId])
-}
-
-enum ResourceKind {
-  BOOK
-  COURSE
-  ARTICLE
-  VIDEO
-  PODCAST
-  PAPER
-  TOOL
-  OTHER
-}
-
-enum ResourceStatus {
-  WANTING
-  IN_PROGRESS
-  ON_HOLD
-  FINISHED
-  DROPPED
-}
-
-model Resource {
-  id      String         @id @default(cuid())
-  userId  String
-  title   String
-  kind    ResourceKind   @default(OTHER)
-  status  ResourceStatus @default(WANTING)
-  url     String?
-  author  String?
-  summary String?
-  // 0-1, hand-set rather than derived: progress through a book is a judgement,
-  // not something that can be computed from a task list.
-  progress  Int      @default(0)
-  rating    Int? // 1-5, set once finished
-  startedAt DateTime?
-  finishedAt DateTime?
-
-  goalId     String?
-  projectId  String?
-  categoryId String?
-
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-
-  user     User      @relation(fields: [userId], references: [id], onDelete: Cascade)
-  goal     Goal?     @relation(fields: [goalId], references: [id], onDelete: SetNull)
-  project  Project?  @relation(fields: [projectId], references: [id], onDelete: SetNull)
-  category Category? @relation(fields: [categoryId], references: [id], onDelete: SetNull)
-  // Highlights and notes taken while reading or watching.
-  notes    Note[]
-
-  @@index([userId, status])
-  @@index([userId, kind])
-  @@index([userId, updatedAt])
-  @@index([goalId])
-  @@index([projectId])
+  @@index([studySessionId])
 }
 
 // ---------------------------------------------------------------------------
@@ -1311,21 +1548,19 @@ model WeeklyReview {
 
   /**
    * The user's own three answers to their week, written by hand.
-   *
    * They live here rather than on `WeeklyPlan` for one reason: a week is the unit
    * of reflection, not a plan. Someone with a fitness plan and a study plan has
    * one week that went well and one week that did not - two reviews would make
    * "how was my week" unanswerable, which is the `@@unique([userId, weekStart])`
    * constraint on this table saying out loud.
-   *
    * Nullable, and left null by the generator. `buildWeeklyReport` produces
    * `summary`/`metrics`/`highlights`; it cannot know what the user felt, and a
    * generated review presented in these fields would be inventing a subjective
    * answer to a question only the user can answer.
    */
-  wentWell        String?
-  shouldImprove   String?
-  nextWeekFocus   String?
+  wentWell      String?
+  shouldImprove String?
+  nextWeekFocus String?
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -1571,4 +1806,326 @@ model CalendarConnection {
   events CalendarEvent[]
 
   @@index([userId, provider])
+}
+
+// ---------------------------------------------------------------------------
+// Fitness - exercise library + workout log
+// ---------------------------------------------------------------------------
+
+/**
+ * An entry in the exercise library.
+ * `userId` is nullable and paired with `isSystem`, matching the `Category`
+ * pattern: a null owner marks a read-only exercise shipped with the app, so
+ * every user gets a usable library on day one without seeding per-user rows.
+ * The uniqueness constraint is per-owner, and Postgres treats NULLs as
+ * distinct, so system rows are not deduplicated against each other by the
+ * database - the seed is responsible for not inserting the same system
+ * exercise twice.
+ */
+model Exercise {
+  id       String  @id @default(cuid())
+  userId   String?
+  isSystem Boolean @default(false)
+
+  name        String
+  muscleGroup MuscleGroup @default(OTHER)
+  equipment   String?
+  notes       String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user             User?                    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  workoutExercises WorkoutExercise[]
+  routineExercises WorkoutRoutineExercise[]
+
+  @@unique([userId, name])
+  @@index([userId, muscleGroup])
+  @@index([isSystem])
+}
+
+/**
+ * A single training session.
+ * `status` separates intent from fact. A PLANNED workout is a target for a
+ * future day (optionally linked to a planner `TimeBlock`); a COMPLETED one is
+ * history. All progress, volume and streak aggregates filter to COMPLETED, so
+ * scheduling a session never inflates what the user has actually done.
+ * `date` is a calendar day (`@db.Date`), not an instant, because a workout
+ * belongs to a day rather than a moment. `startAt` carries the optional time
+ * of day and `minutes` a manual duration, since a workout logged after the
+ * fact may not have a reliable start/end pair.
+ */
+model Workout {
+  id     String @id @default(cuid())
+  userId String
+
+  name        String
+  date        DateTime      @db.Date
+  startAt     DateTime?
+  minutes     Int?
+  notes       String?
+  status      WorkoutStatus @default(COMPLETED)
+  completedAt DateTime?
+
+  /**
+   * When an IN_PROGRESS session was started. Null for everything else, because a
+   * completed session logged after the fact has no reliable start moment and
+   * inventing one (`completedAt` minus `minutes`) would be a guess stored as a
+   * fact.
+   */
+  startedAt DateTime?
+
+  /**
+   * Target muscle groups for a session, as free-form labels rather than the
+   * `MuscleGroup` enum.
+   * The enum is the right shape for the *library* — one exercise, one primary
+   * group. A scheduled day is not: "Chest + Triceps" and "Abs" are what a person
+   * writes on a plan, and mapping those onto a fixed enum would either lose the
+   * distinction (Triceps and Biceps both collapse to ARMS) or force a taxonomy
+   * the user did not choose. So a day's groups are strings, and the library's
+   * enum stays where it belongs.
+   */
+  muscleGroups String[] @default([])
+
+  categoryId String?
+  goalId     String?
+
+  /**
+   * Optional habit this workout contributes to. See `HabitLog.workoutId` for the
+   * double-count rule that makes this safe.
+   */
+  habitId String?
+
+  /**
+   * Provenance for a session materialised from a recurring routine. Both are
+   * SetNull, so deleting a routine keeps every session it generated — history is
+   * a record of what happened, not an extension of the template that proposed it.
+   */
+  routineId    String?
+  routineDayId String?
+
+  /**
+   * On a rescheduled copy, the date of the slot it was moved from. This is the
+   * link between the terminal RESCHEDULED original and the PLANNED replacement,
+   * and it is what lets the week show "moved here from Tuesday".
+   */
+  rescheduledFromDate DateTime? @db.Date
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user       User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+  category   Category?          @relation(fields: [categoryId], references: [id], onDelete: SetNull)
+  goal       Goal?              @relation(fields: [goalId], references: [id], onDelete: SetNull)
+  habit      Habit?             @relation(fields: [habitId], references: [id], onDelete: SetNull)
+  routine    WorkoutRoutine?    @relation(fields: [routineId], references: [id], onDelete: SetNull)
+  routineDay WorkoutRoutineDay? @relation(fields: [routineDayId], references: [id], onDelete: SetNull)
+  exercises  WorkoutExercise[]
+  timeBlocks TimeBlock[]
+  habitLogs  HabitLog[]
+
+  @@index([userId, date])
+  @@index([userId, status])
+  @@index([userId, date, status])
+  @@index([categoryId])
+  @@index([goalId])
+  @@index([routineId])
+  @@index([routineDayId])
+}
+
+/**
+ * One exercise within a workout.
+ * `name` is a denormalised snapshot copied from the library at the time the
+ * exercise is added, and `exerciseId` is only a soft link. A personal best is
+ * tracked against the snapshot name so that editing or deleting a library
+ * exercise never rewrites (or erases) the history that referenced it.
+ */
+model WorkoutExercise {
+  id         String  @id @default(cuid())
+  workoutId  String
+  exerciseId String?
+  name       String
+  position   Int     @default(0)
+  notes      String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  workout  Workout      @relation(fields: [workoutId], references: [id], onDelete: Cascade)
+  exercise Exercise?    @relation(fields: [exerciseId], references: [id], onDelete: SetNull)
+  sets     WorkoutSet[]
+
+  @@index([workoutId, position])
+  @@index([exerciseId])
+}
+
+/**
+ * One set of an exercise.
+ * Strength sets are described by `reps` and `weight`; timed sets (planks,
+ * cardio intervals) by `durationSeconds`. All are optional so both kinds can
+ * share a table without inventing sentinel values, and `completed` lets a user
+ * log a set they did not finish (a failed rep) without deleting the plan.
+ */
+model WorkoutSet {
+  id                String  @id @default(cuid())
+  workoutExerciseId String
+  position          Int     @default(0)
+  reps              Int?
+  weight            Float?
+  durationSeconds   Int?
+  restSeconds       Int?
+  completed         Boolean @default(true)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  workoutExercise WorkoutExercise @relation(fields: [workoutExerciseId], references: [id], onDelete: Cascade)
+
+  @@index([workoutExerciseId, position])
+}
+
+// ---------------------------------------------------------------------------
+// Fitness - recurring weekly workout routines (the weekly planner's template)
+// ---------------------------------------------------------------------------
+
+/**
+ * A named, recurring weekly training split: Push/Pull/Legs, Upper/Lower, a
+ * five-day bro split.
+ * This is deliberately NOT the existing `Routine` model. That one is a *sequence
+ * of steps to run through in one sitting* (a morning routine, a study routine)
+ * and its `kind` merely tags what it is about; a training week is a different
+ * structure entirely — seven weekdays, some of which are rest days, each
+ * carrying a set of exercises. Reusing `Routine` would mean a table whose
+ * meaning depends on its `kind`, which is exactly the kind of conditional schema
+ * this codebase avoids.
+ * A routine is a *template*. It never stores the sessions the user actually did;
+ * those are `Workout` rows, and deleting a routine must not delete them. The
+ * planner materialises the template into concrete `Workout` rows over a rolling
+ * horizon, so editing a day to add a real exercise set writes to the session, and
+ * editing the template only affects sessions not yet generated.
+ */
+model WorkoutRoutine {
+  id     String @id @default(cuid())
+  userId String
+
+  name        String
+  description String?
+  color       String  @default("#C8F751")
+
+  /**
+   * Whether this routine is the one driving the schedule right now. At most one
+   * routine per user is active, enforced in the service layer when a routine is
+   * activated (activating one pauses the rest) rather than by a partial unique
+   * index, so the invariant lives beside the write that must maintain it.
+   */
+  isActive    Boolean   @default(false)
+  activatedAt DateTime?
+  pausedAt    DateTime?
+
+  /**
+   * The last calendar day the routine has been materialised through.
+   * This is the frontier the lazy generator extends up to, and it is why a
+   * session the user deliberately deleted does not silently reappear on the next
+   * page load: generation only ever fills days *after* this marker, never days
+   * behind it. `null` means nothing has been generated yet. Activating or
+   * re-applying a routine rewinds it to today, because those actions replace the
+   * whole future schedule by design.
+   */
+  generatedThrough DateTime? @db.Date
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user     User                @relation(fields: [userId], references: [id], onDelete: Cascade)
+  days     WorkoutRoutineDay[]
+  workouts Workout[]
+
+  @@index([userId, isActive])
+  @@index([userId, createdAt])
+}
+
+/**
+ * One weekday of a routine.
+ * `weekday` is 0 = Monday .. 6 = Sunday, matching the Monday-first week the
+ * planner UI shows. This differs from `WeeklyPlanDay.dayOfWeek` and
+ * `HabitSchedule.dayOfWeek`, which follow JS `Date.getDay()` (0 = Sunday); the
+ * divergence is deliberate and local to this table. A training week is
+ * conventionally read Monday-first, and converting at the two boundaries (the
+ * generator and the serialiser) is cheaper than making every reader of this
+ * column remember an offset.
+ * A day is either a training day (exercises, target minutes) or a rest day. Rest
+ * is stored explicitly rather than inferred from "no exercises" for the same
+ * reason `WeeklyPlanDay` exists: "Wednesday is rest" and "I have not filled
+ * Wednesday in" are different claims.
+ */
+model WorkoutRoutineDay {
+  id            String   @id @default(cuid())
+  routineId     String
+  weekday       Int // 0 = Monday .. 6 = Sunday
+  name          String
+  muscleGroups  String[] @default([])
+  isRest        Boolean  @default(false)
+  targetMinutes Int?
+  /**
+   * Optional default start time, minutes from local midnight.
+   */
+  startMinutes  Int?
+  notes         String?
+  position      Int      @default(0)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  routine   WorkoutRoutine           @relation(fields: [routineId], references: [id], onDelete: Cascade)
+  exercises WorkoutRoutineExercise[]
+  workouts  Workout[]
+
+  @@unique([routineId, weekday])
+  @@index([routineId])
+}
+
+/**
+ * One exercise within a routine day.
+ * Mirrors `WorkoutExercise`: `name` is the durable snapshot and `exerciseId` a
+ * soft link to the library, so editing or deleting a library exercise never
+ * rewrites the template.
+ */
+model WorkoutRoutineExercise {
+  id           String  @id @default(cuid())
+  routineDayId String
+  exerciseId   String?
+  name         String
+  position     Int     @default(0)
+  restSeconds  Int?
+  notes        String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  routineDay WorkoutRoutineDay   @relation(fields: [routineDayId], references: [id], onDelete: Cascade)
+  exercise   Exercise?           @relation(fields: [exerciseId], references: [id], onDelete: SetNull)
+  sets       WorkoutRoutineSet[]
+
+  @@index([routineDayId, position])
+  @@index([exerciseId])
+}
+
+/**
+ * One planned set within a routine exercise. Same shape as `WorkoutSet`.
+ */
+model WorkoutRoutineSet {
+  id                String @id @default(cuid())
+  routineExerciseId String
+  position          Int    @default(0)
+  reps              Int?
+  weight            Float?
+  durationSeconds   Int?
+  restSeconds       Int?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  routineExercise WorkoutRoutineExercise @relation(fields: [routineExerciseId], references: [id], onDelete: Cascade)
+
+  @@index([routineExerciseId, position])
 }

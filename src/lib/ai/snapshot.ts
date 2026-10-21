@@ -165,44 +165,6 @@ export interface SnapshotProject {
   tasks: { status: string; completedAt: Date | null }[];
 }
 
-export interface SnapshotResource {
-  id: string;
-  title: string;
-  kind: string;
-  status: string;
-  progress: number;
-  url: string | null;
-  author: string | null;
-  goalId: string | null;
-  updatedAt: Date;
-}
-
-export interface SnapshotNote {
-  id: string;
-  title: string;
-  pinned: boolean;
-  wordCount: number;
-  taskId: string | null;
-  goalId: string | null;
-  projectId: string | null;
-  resourceId: string | null;
-  updatedAt: Date;
-}
-
-export interface SnapshotKnowledge {
-  notes: SnapshotNote[];
-  resources: SnapshotResource[];
-  noteCount: number;
-  resourceCount: number;
-  /**
-   * Notes and resources written in the analysed window. Kept apart from the
-   * totals so a screen can say "you wrote 4 notes this week" without re-deriving
-   * the window boundary.
-   */
-  recentNoteCount: number;
-  recentResourceCount: number;
-}
-
 export interface SnapshotRoutine {
   id: string;
   name: string;
@@ -255,7 +217,6 @@ export interface LifeSnapshot {
   goals: SnapshotGoal[];
   projects: SnapshotProject[];
   routines: SnapshotRoutine[];
-  knowledge: SnapshotKnowledge;
   /** True when the user is new enough that no analysis would be meaningful. */
   sparse: boolean;
 }
@@ -305,12 +266,6 @@ export async function loadSnapshot(
     goals,
     projects,
     routines,
-    notes,
-    resources,
-    noteTotal,
-    resourceTotal,
-    recentNoteTotal,
-    recentResourceTotal,
   ] = await Promise.all([
     prisma.user.findUnique({
       where: { id: userId },
@@ -482,47 +437,6 @@ export async function loadSnapshot(
         runs: { where: { completedAt: { not: null } }, select: { id: true } },
       },
     }),
-    prisma.note.findMany({
-      where: { userId, updatedAt: { gte: historyFrom } },
-      orderBy: [{ pinned: "desc" }, { updatedAt: "desc" }],
-      take: 50,
-      select: {
-        id: true,
-        title: true,
-        pinned: true,
-        body: true,
-        taskId: true,
-        goalId: true,
-        projectId: true,
-        resourceId: true,
-        updatedAt: true,
-      },
-    }),
-    prisma.resource.findMany({
-      where: { userId },
-      orderBy: { updatedAt: "desc" },
-      take: 50,
-      select: {
-        id: true,
-        title: true,
-        kind: true,
-        status: true,
-        progress: true,
-        url: true,
-        author: true,
-        goalId: true,
-        updatedAt: true,
-      },
-    }),
-
-    // Totals are counted rather than derived from the rows above. Both list
-    // queries are capped for the AI's benefit, and a count taken from a capped
-    // list is wrong the moment a user passes the cap - "you have 50 notes" is
-    // the kind of confident inaccuracy that then drives a suggestion.
-    prisma.note.count({ where: { userId } }),
-    prisma.resource.count({ where: { userId } }),
-    prisma.note.count({ where: { userId, updatedAt: { gte: historyFrom } } }),
-    prisma.resource.count({ where: { userId, updatedAt: { gte: historyFrom } } }),
   ]);
 
   if (!user) {
@@ -568,14 +482,6 @@ export async function loadSnapshot(
       goals: [],
       projects: [],
       routines: [],
-      knowledge: {
-        notes: [],
-        resources: [],
-        noteCount: 0,
-        resourceCount: 0,
-        recentNoteCount: 0,
-        recentResourceCount: 0,
-      },
       sparse: true,
     };
   }
@@ -719,38 +625,6 @@ export async function loadSnapshot(
       runCount: r._count.runs,
       completedRunCount: r.runs.length,
     })),
-    knowledge: {
-      notes: notes.map((n) => ({
-        id: n.id,
-        title: n.title,
-        pinned: n.pinned,
-        // Word count is a proxy for effort, and it is computed rather than stored
-        // so an edit to the body is reflected without a second write.
-        wordCount: n.body.trim() === "" ? 0 : n.body.trim().split(/\s+/).length,
-        taskId: n.taskId,
-        goalId: n.goalId,
-        projectId: n.projectId,
-        resourceId: n.resourceId,
-        updatedAt: n.updatedAt,
-      })),
-      resources: resources.map((r) => ({
-        id: r.id,
-        title: r.title,
-        kind: r.kind,
-        status: r.status,
-        progress: r.progress,
-        url: r.url,
-        author: r.author,
-        goalId: r.goalId,
-        updatedAt: r.updatedAt,
-      })),
-      // Real totals from `count`, not `notes.length`. The list above is capped
-      // at 50 rows, so its length is a display limit and not a count of anything.
-      noteCount: noteTotal,
-      resourceCount: resourceTotal,
-      recentNoteCount: recentNoteTotal,
-      recentResourceCount: recentResourceTotal,
-    },
     sparse: false,
   };
 

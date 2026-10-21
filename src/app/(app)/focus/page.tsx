@@ -43,7 +43,11 @@ export default async function FocusPage() {
         notes: true,
         endedEarly: true,
         xpAwarded: true,
+        pausedAt: true,
+        pausedSeconds: true,
+        studySessionId: true,
         task: { select: { id: true, title: true, status: true } },
+        studySession: { select: { id: true, title: true, subject: true } },
       },
     }),
     prisma.task.findMany({
@@ -76,6 +80,11 @@ export default async function FocusPage() {
     notes: s.notes,
     endedEarly: s.endedEarly,
     xpAwarded: s.xpAwarded,
+    pausedAt: s.pausedAt?.toISOString() ?? null,
+    pausedSeconds: s.pausedSeconds,
+    studySessionId: s.studySessionId,
+    studyTitle: s.studySession?.title ?? null,
+    studySubject: s.studySession?.subject ?? null,
     unfinished: s.endedAt === null,
   }));
 

@@ -31,7 +31,6 @@ const EXPECTED_SECTIONS = [
   "/journal",
   "/fitness",
   "/study",
-  "/knowledge",
   "/goals",
   "/projects",
   "/analytics",

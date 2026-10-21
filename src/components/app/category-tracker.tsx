@@ -26,13 +26,20 @@ import { cn } from "@/lib/utils";
 /**
  * The habit list behind the Fitness and Study screens.
  *
- * There is no Workout model and no StudySession model, and that is a decision
- * rather than a gap. Both screens are **views over `Category.kind`**: a habit
- * filed under a FITNESS or STUDY category is already logged, already streak-
- * tracked, and already on the dashboard, and this component is the same list
- * with a different lens. Adding a parallel table would mean a second place to
- * record "ran 3 km", and the two would inevitably disagree — the app would gain a
- * number it could not trust.
+ * Both screens are **views over `Category.kind`**: a habit filed under a FITNESS
+ * or STUDY category is already logged, already streak-tracked, and already on
+ * the dashboard, and this component is the same list with a different lens. It
+ * is the lighter record for both domains — "walk 3 km" in Fitness, "read 30 min"
+ * in Study — and stays independent of the structured `Workout` log so a session
+ * is never recorded in two places and double-counted.
+ *
+ * Study now has a session model of its own — the timetable's `StudySession` and
+ * `StudySeries` — but this list deliberately stays independent of it. A session
+ * that feeds a habit writes one habit log and nothing else, so the two never
+ * double-count; a habit is still the right home for the countable, repeatable
+ * part ("read 30 min") and the timetable for the scheduled part ("DSA, Tuesday
+ * 7pm"). Fitness has the same split with `Workout`, but only because a set of
+ * reps and weights is data a habit row genuinely cannot hold.
  *
  * The consequence is stated honestly in the UI: these screens show what you
  * categorised as fitness and study. If a habit is uncategorised it will not

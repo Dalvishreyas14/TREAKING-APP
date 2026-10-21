@@ -141,6 +141,120 @@ const HABIT_BASE_RATE: Record<string, number> = {
   "Practice guitar": 0.57,
 };
 
+/**
+ * The shared system exercise library (userId null, isSystem true). Modest but
+ * covering every muscle group the UI offers, so a fresh user can build a
+ * session without typing every movement themselves.
+ */
+const SYSTEM_EXERCISES = [
+  { name: "Bench Press", muscleGroup: "CHEST", equipment: "Barbell" },
+  { name: "Incline Dumbbell Press", muscleGroup: "CHEST", equipment: "Dumbbell" },
+  { name: "Push-up", muscleGroup: "CHEST", equipment: "Bodyweight" },
+  { name: "Cable Fly", muscleGroup: "CHEST", equipment: "Cable" },
+  { name: "Deadlift", muscleGroup: "BACK", equipment: "Barbell" },
+  { name: "Pull-up", muscleGroup: "BACK", equipment: "Bodyweight" },
+  { name: "Barbell Row", muscleGroup: "BACK", equipment: "Barbell" },
+  { name: "Lat Pulldown", muscleGroup: "BACK", equipment: "Cable" },
+  { name: "Overhead Press", muscleGroup: "SHOULDERS", equipment: "Barbell" },
+  { name: "Lateral Raise", muscleGroup: "SHOULDERS", equipment: "Dumbbell" },
+  { name: "Face Pull", muscleGroup: "SHOULDERS", equipment: "Cable" },
+  { name: "Biceps Curl", muscleGroup: "ARMS", equipment: "Dumbbell" },
+  { name: "Triceps Pushdown", muscleGroup: "ARMS", equipment: "Cable" },
+  { name: "Hammer Curl", muscleGroup: "ARMS", equipment: "Dumbbell" },
+  { name: "Plank", muscleGroup: "CORE", equipment: "Bodyweight" },
+  { name: "Hanging Leg Raise", muscleGroup: "CORE", equipment: "Bodyweight" },
+  { name: "Russian Twist", muscleGroup: "CORE", equipment: "Bodyweight" },
+  { name: "Back Squat", muscleGroup: "LEGS", equipment: "Barbell" },
+  { name: "Romanian Deadlift", muscleGroup: "LEGS", equipment: "Barbell" },
+  { name: "Leg Press", muscleGroup: "LEGS", equipment: "Machine" },
+  { name: "Walking Lunge", muscleGroup: "LEGS", equipment: "Dumbbell" },
+  { name: "Leg Curl", muscleGroup: "LEGS", equipment: "Machine" },
+  { name: "Hip Thrust", muscleGroup: "GLUTES", equipment: "Barbell" },
+  { name: "Glute Bridge", muscleGroup: "GLUTES", equipment: "Bodyweight" },
+  { name: "Treadmill Run", muscleGroup: "CARDIO", equipment: "Machine" },
+  { name: "Rowing Machine", muscleGroup: "CARDIO", equipment: "Machine" },
+  { name: "Stationary Bike", muscleGroup: "CARDIO", equipment: "Machine" },
+  { name: "Jump Rope", muscleGroup: "CARDIO", equipment: "Bodyweight" },
+  { name: "Kettlebell Swing", muscleGroup: "FULL_BODY", equipment: "Kettlebell" },
+  { name: "Burpee", muscleGroup: "FULL_BODY", equipment: "Bodyweight" },
+  { name: "Hip Flexor Stretch", muscleGroup: "OTHER", equipment: "Bodyweight" },
+  { name: "Cat-Cow", muscleGroup: "OTHER", equipment: "Bodyweight" },
+  { name: "Downward Dog", muscleGroup: "OTHER", equipment: "Bodyweight" },
+] as const;
+
+/**
+ * Workout sessions. A strength set carries reps and weight; a timed set carries
+ * seconds. The two are kept apart rather than collapsed into a single "amount"
+ * so the seeded data has the same shape the app writes and reads.
+ */
+const WORKOUT_TEMPLATES = [
+  {
+    key: "push",
+    name: "Push day",
+    minutes: 55,
+    exercises: [
+      { name: "Bench Press", sets: 4, reps: [6, 10], weight: [40, 70] },
+      { name: "Incline Dumbbell Press", sets: 3, reps: [8, 12], weight: [14, 22] },
+      { name: "Overhead Press", sets: 3, reps: [8, 12], weight: [20, 32] },
+      { name: "Triceps Pushdown", sets: 3, reps: [10, 15], weight: [15, 25] },
+    ],
+  },
+  {
+    key: "pull",
+    name: "Pull day",
+    minutes: 60,
+    exercises: [
+      { name: "Deadlift", sets: 3, reps: [5, 8], weight: [60, 100] },
+      { name: "Pull-up", sets: 3, reps: [5, 10] },
+      { name: "Barbell Row", sets: 3, reps: [8, 12], weight: [30, 50] },
+      { name: "Biceps Curl", sets: 3, reps: [10, 15], weight: [10, 18] },
+    ],
+  },
+  {
+    key: "legs",
+    name: "Leg day",
+    minutes: 65,
+    exercises: [
+      { name: "Back Squat", sets: 4, reps: [6, 10], weight: [50, 90] },
+      { name: "Romanian Deadlift", sets: 3, reps: [8, 12], weight: [40, 70] },
+      { name: "Leg Press", sets: 3, reps: [10, 15], weight: [80, 140] },
+      { name: "Walking Lunge", sets: 3, reps: [10, 14], weight: [10, 20] },
+    ],
+  },
+  {
+    key: "conditioning",
+    name: "Conditioning",
+    minutes: 40,
+    exercises: [
+      { name: "Treadmill Run", sets: 1, seconds: [1200, 2400] },
+      { name: "Rowing Machine", sets: 1, seconds: [600, 1200] },
+      { name: "Plank", sets: 3, seconds: [30, 90] },
+    ],
+  },
+  {
+    key: "mobility",
+    name: "Mobility & core",
+    minutes: 30,
+    exercises: [
+      { name: "Cat-Cow", sets: 2, seconds: [60, 120] },
+      { name: "Downward Dog", sets: 3, seconds: [30, 60] },
+      { name: "Hip Flexor Stretch", sets: 2, seconds: [45, 90] },
+      { name: "Plank", sets: 3, seconds: [30, 75] },
+    ],
+  },
+] as const;
+
+/** Day of week (0 = Sunday) to the session trained that day, if any. */
+const WORKOUT_SCHEDULE: Record<number, (typeof WORKOUT_TEMPLATES)[number]["key"] | null> = {
+  0: "mobility",
+  1: "push",
+  2: "conditioning",
+  3: null,
+  4: "pull",
+  5: null,
+  6: "legs",
+};
+
 const GOALS = [
   {
     title: "Run a half marathon",
@@ -335,6 +449,35 @@ async function main() {
   }
   console.log(`resolved ${categoryIds.size} system categories`);
 
+  // ------------------------------------------------- exercise library
+  //
+  // System exercises are shared (userId null) and therefore outlive the demo
+  // user's deletion. `(userId, name)` is unique, but Postgres treats NULLs as
+  // distinct, so - exactly like categories - they are resolved by hand rather
+  // than upserted, or a second seed run would create a duplicate library.
+
+  const exerciseIdByName = new Map<string, string>();
+  for (const e of SYSTEM_EXERCISES) {
+    let row = await prisma.exercise.findFirst({
+      where: { userId: null, name: e.name },
+      select: { id: true },
+    });
+    if (!row) {
+      row = await prisma.exercise.create({
+        data: {
+          userId: null,
+          isSystem: true,
+          name: e.name,
+          muscleGroup: e.muscleGroup,
+          equipment: e.equipment,
+        },
+        select: { id: true },
+      });
+    }
+    exerciseIdByName.set(e.name, row.id);
+  }
+  console.log(`resolved ${exerciseIdByName.size} system exercises`);
+
   const tagIds: string[] = [];
   for (const t of [
     { name: "deep-work", color: "#7C6BFF" },
@@ -463,6 +606,284 @@ async function main() {
     await prisma.habitLog.createMany({ data: logs });
   }
   console.log(`created ${habitIds.length} habits with ${(HISTORY_DAYS + 1) * habitIds.length} logs`);
+
+  // ------------------------------------------------------------ workouts
+  //
+  // Strength and cardio history, scheduled by day of week with a realistic miss
+  // rate. This is what the fitness log, the personal-best table and the weekly
+  // chart read from; without it those surfaces are empty on first load.
+
+  let workoutCount = 0;
+  let workoutSetCount = 0;
+
+  for (let back = HISTORY_DAYS; back >= 0; back--) {
+    const day = dayOffset(-back);
+    const key = WORKOUT_SCHEDULE[day.getUTCDay()];
+    if (!key) continue;
+    // Roughly one session in five is skipped, which keeps streaks and weekly
+    // totals from reading as a perfect, obviously-synthetic record.
+    if (back !== 0 && chance(0.2)) continue;
+
+    const template = WORKOUT_TEMPLATES.find((t) => t.key === key)!;
+    const startAt = atMinutes(day, (key === "mobility" ? 9 : 18) * 60);
+    const minutes = template.minutes + int(-1, 1) * 5;
+
+    const workout = await prisma.workout.create({
+      data: {
+        userId: user.id,
+        name: template.name,
+        date: day,
+        startAt,
+        minutes,
+        status: "COMPLETED",
+        completedAt: new Date(startAt.getTime() + minutes * 60_000),
+        categoryId: categoryIds.get("fitness") ?? null,
+        // Conditioning is the training that serves the half-marathon goal.
+        goalId: key === "conditioning" ? (goalIds[0] ?? null) : null,
+      },
+      select: { id: true },
+    });
+    workoutCount++;
+
+    for (const [i, exercise] of template.exercises.entries()) {
+      const row = await prisma.workoutExercise.create({
+        data: {
+          workoutId: workout.id,
+          exerciseId: exerciseIdByName.get(exercise.name) ?? null,
+          name: exercise.name,
+          position: i,
+        },
+        select: { id: true },
+      });
+
+      const sets: {
+        workoutExerciseId: string;
+        position: number;
+        reps?: number;
+        weight?: number;
+        durationSeconds?: number;
+        restSeconds: number;
+        completed: boolean;
+      }[] = [];
+
+      for (let s = 0; s < exercise.sets; s++) {
+        if ("reps" in exercise) {
+          const set: (typeof sets)[number] = {
+            workoutExerciseId: row.id,
+            position: s,
+            reps: int(exercise.reps[0], exercise.reps[1]),
+            restSeconds: int(60, 120),
+            completed: true,
+          };
+          if ("weight" in exercise) {
+            const raw = int(exercise.weight[0], exercise.weight[1]);
+            // Plates go up in 2.5 kg steps, so a 43.7 kg lift would be a lie.
+            set.weight = Math.round(raw / 2.5) * 2.5;
+          }
+          sets.push(set);
+        } else {
+          sets.push({
+            workoutExerciseId: row.id,
+            position: s,
+            durationSeconds: int(exercise.seconds[0], exercise.seconds[1]),
+            restSeconds: int(30, 60),
+            completed: true,
+          });
+        }
+      }
+
+      await prisma.workoutSet.createMany({ data: sets });
+      workoutSetCount += sets.length;
+    }
+  }
+  console.log(`created ${workoutCount} completed workouts with ${workoutSetCount} sets`);
+
+  // One planned session in the near future, placed on the planner in the same
+  // way the API does, so "planned vs logged" and the planner link both have
+  // something real to render.
+  const planDay = dayOffset(1);
+  const planMinutes = 50;
+  const planStart = atMinutes(planDay, 18 * 60);
+  const plannedWorkout = await prisma.workout.create({
+    data: {
+      userId: user.id,
+      name: "Push day",
+      date: planDay,
+      startAt: planStart,
+      minutes: planMinutes,
+      status: "PLANNED",
+      categoryId: categoryIds.get("fitness") ?? null,
+      exercises: {
+        create: [
+          {
+            name: "Bench Press",
+            position: 0,
+            exerciseId: exerciseIdByName.get("Bench Press") ?? null,
+            sets: {
+              create: [
+                { position: 0, reps: 8, weight: 40, restSeconds: 90 },
+                { position: 1, reps: 8, weight: 40, restSeconds: 90 },
+                { position: 2, reps: 6, weight: 42.5, restSeconds: 120 },
+              ],
+            },
+          },
+          {
+            name: "Overhead Press",
+            position: 1,
+            exerciseId: exerciseIdByName.get("Overhead Press") ?? null,
+            sets: {
+              create: [
+                { position: 0, reps: 10, weight: 22.5, restSeconds: 90 },
+                { position: 1, reps: 10, weight: 22.5, restSeconds: 90 },
+              ],
+            },
+          },
+        ],
+      },
+    },
+    select: { id: true },
+  });
+  await prisma.timeBlock.create({
+    data: {
+      userId: user.id,
+      title: "Push day",
+      date: planDay,
+      startAt: planStart,
+      endAt: new Date(planStart.getTime() + planMinutes * 60_000),
+      color: "#C8F751",
+      source: "MANUAL",
+      workoutId: plannedWorkout.id,
+    },
+  });
+  console.log("created 1 planned workout scheduled on the planner");
+
+  // A ready-made weekly routine, active, so the weekly planner has a real
+  // template behind it on first load. `generatedThrough` is deliberately left
+  // null: the first schedule read materialises the week lazily, which is the
+  // exact path a user's own routine takes.
+  const routineExercise = (
+    name: string,
+    sets: { reps?: number; weight?: number; durationSeconds?: number; restSeconds?: number }[],
+  ) => ({
+    exerciseId: exerciseIdByName.get(name) ?? null,
+    name,
+    restSeconds: null,
+    sets: {
+      create: sets.map((set, index) => ({
+        position: index,
+        reps: set.reps ?? null,
+        weight: set.weight ?? null,
+        durationSeconds: set.durationSeconds ?? null,
+        restSeconds: set.restSeconds ?? null,
+      })),
+    },
+  });
+
+  await prisma.workoutRoutine.create({
+    data: {
+      userId: user.id,
+      name: "Push · Pull · Legs",
+      description: "Three strength days with active recovery, repeating weekly.",
+      color: "#C8F751",
+      isActive: true,
+      activatedAt: new Date(),
+      days: {
+        create: [
+          {
+            weekday: 0,
+            name: "Push",
+            muscleGroups: ["Chest", "Shoulders", "Triceps"],
+            position: 0,
+            targetMinutes: 55,
+            exercises: {
+              create: [
+                routineExercise("Bench Press", [
+                  { reps: 8, weight: 45, restSeconds: 120 },
+                  { reps: 8, weight: 45, restSeconds: 120 },
+                  { reps: 6, weight: 50, restSeconds: 150 },
+                ]),
+                routineExercise("Overhead Press", [
+                  { reps: 10, weight: 25, restSeconds: 90 },
+                  { reps: 10, weight: 25, restSeconds: 90 },
+                ]),
+                routineExercise("Triceps Pushdown", [
+                  { reps: 12, weight: 20, restSeconds: 60 },
+                  { reps: 12, weight: 20, restSeconds: 60 },
+                ]),
+              ],
+            },
+          },
+          { weekday: 1, name: "Rest", isRest: true, position: 1 },
+          {
+            weekday: 2,
+            name: "Pull",
+            muscleGroups: ["Back", "Biceps"],
+            position: 2,
+            targetMinutes: 60,
+            exercises: {
+              create: [
+                routineExercise("Deadlift", [
+                  { reps: 6, weight: 80, restSeconds: 180 },
+                  { reps: 6, weight: 80, restSeconds: 180 },
+                  { reps: 5, weight: 90, restSeconds: 180 },
+                ]),
+                routineExercise("Barbell Row", [
+                  { reps: 10, weight: 40, restSeconds: 90 },
+                  { reps: 10, weight: 40, restSeconds: 90 },
+                ]),
+                routineExercise("Biceps Curl", [
+                  { reps: 12, weight: 14, restSeconds: 60 },
+                  { reps: 12, weight: 14, restSeconds: 60 },
+                ]),
+              ],
+            },
+          },
+          { weekday: 3, name: "Rest", isRest: true, position: 3 },
+          {
+            weekday: 4,
+            name: "Legs",
+            muscleGroups: ["Legs", "Glutes", "Abs"],
+            position: 4,
+            targetMinutes: 60,
+            exercises: {
+              create: [
+                routineExercise("Back Squat", [
+                  { reps: 8, weight: 60, restSeconds: 150 },
+                  { reps: 8, weight: 60, restSeconds: 150 },
+                  { reps: 6, weight: 70, restSeconds: 180 },
+                ]),
+                routineExercise("Romanian Deadlift", [
+                  { reps: 10, weight: 50, restSeconds: 90 },
+                  { reps: 10, weight: 50, restSeconds: 90 },
+                ]),
+                routineExercise("Plank", [
+                  { durationSeconds: 60, restSeconds: 45 },
+                  { durationSeconds: 60, restSeconds: 45 },
+                ]),
+              ],
+            },
+          },
+          { weekday: 5, name: "Rest", isRest: true, position: 5 },
+          {
+            weekday: 6,
+            name: "Mobility",
+            muscleGroups: ["Mobility", "Core"],
+            position: 6,
+            targetMinutes: 30,
+            exercises: {
+              create: [
+                routineExercise("Cat-Cow", [{ durationSeconds: 90, restSeconds: 30 }]),
+                routineExercise("Downward Dog", [{ durationSeconds: 45, restSeconds: 30 }]),
+                routineExercise("Hip Flexor Stretch", [{ durationSeconds: 60, restSeconds: 30 }]),
+              ],
+            },
+          },
+        ],
+      },
+    },
+    select: { id: true },
+  });
+  console.log("created 1 active weekly routine (Push · Pull · Legs)");
 
   // -------------------------------------------------- mood and energy
 

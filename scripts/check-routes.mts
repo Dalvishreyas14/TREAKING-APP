@@ -20,7 +20,6 @@ const ALL_ROUTES = [
   "/journal",
   "/fitness",
   "/study",
-  "/knowledge",
   "/goals",
   "/projects",
   "/analytics",

@@ -32,6 +32,15 @@ const startBody = z.object({
   type: z.enum(["POMODORO", "CUSTOM", "DEEP_WORK"]).default("POMODORO"),
   taskId: z.string().min(1).nullable().optional(),
   notes: z.string().trim().max(2000).nullable().optional(),
+  /**
+   * The scheduled study session this timer is running against.
+   *
+   * Optional on purpose: a timer started from the Focus page has no study
+   * session and behaves exactly as it always did. When it is present the
+   * session is marked in progress, and finishing the timer writes the *actual*
+   * minutes back to it.
+   */
+  studySessionId: z.string().min(1).nullable().optional(),
 });
 
 const sessionSelect = {
@@ -46,7 +55,13 @@ const sessionSelect = {
   notes: true,
   endedEarly: true,
   xpAwarded: true,
+  pausedAt: true,
+  pausedSeconds: true,
+  studySessionId: true,
   task: { select: { id: true, title: true, status: true } },
+  studySession: {
+    select: { id: true, title: true, subject: true, color: true, date: true },
+  },
 } as const;
 
 export const GET = withApi({
@@ -124,16 +139,47 @@ export const POST = withApi({
       );
     }
 
-    const session = await prisma.focusSession.create({
-      data: {
-        userId: user.id,
-        taskId: body.taskId ?? null,
-        startedAt: new Date(),
-        plannedSeconds: body.plannedSeconds,
-        type: body.type,
-        notes: body.notes ?? null,
-      },
-      select: sessionSelect,
+    // A study session can only be started if it is one the user owns and has
+    // not already finished. The check is here rather than in the client so a
+    // crafted id cannot start a timer against somebody else's timetable.
+    let studySession: { id: string } | null = null;
+    if (body.studySessionId) {
+      const found = await prisma.studySession.findFirst({
+        where: { id: body.studySessionId, userId: user.id },
+        select: { id: true, status: true, durationMinutes: true },
+      });
+      if (!found) throw ApiError.notFound("That study session no longer exists.");
+      if (found.status === "COMPLETED") {
+        throw ApiError.badRequest("That session is already finished.");
+      }
+      studySession = found;
+    }
+
+    const session = await prisma.$transaction(async (tx) => {
+      const created = await tx.focusSession.create({
+        data: {
+          userId: user.id,
+          taskId: body.taskId ?? null,
+          startedAt: new Date(),
+          plannedSeconds: body.plannedSeconds,
+          type: body.type,
+          notes: body.notes ?? null,
+          studySessionId: studySession?.id ?? null,
+        },
+        select: sessionSelect,
+      });
+
+      // The study session is now happening. Marking it here rather than on
+      // finish means the timetable shows the session as in progress while the
+      // timer is running, which is what the user is looking at.
+      if (studySession) {
+        await tx.studySession.update({
+          where: { id: studySession.id },
+          data: { status: "IN_PROGRESS", startedAt: new Date() },
+        });
+      }
+
+      return created;
     });
 
     return session;

@@ -5,6 +5,7 @@ import { ApiError } from "@/lib/api/errors";
 import { assertOwnership } from "@/lib/auth/guards";
 import { prisma } from "@/lib/db";
 import { todayUtc, dateOnly } from "@/lib/date";
+import { habitCompletion } from "@/lib/habits/rules";
 import { LIMITS } from "@/lib/rate-limit";
 import { habitLogSchema } from "@/lib/validation/schemas";
 
@@ -57,10 +58,10 @@ export const POST = withApi({
       });
     }
 
-    const isBoolean = habit!.type === "BOOLEAN";
-    const value = isBoolean ? (body.value > 0 ? 1 : 0) : body.value;
-    const target = habit!.targetValue > 0 ? habit!.targetValue : 1;
-    const completed = isBoolean ? value > 0 : value >= target;
+    // The value and the verdict come from the shared rules, so the habit screen
+    // and the study timetable cannot drift into disagreeing about what counts
+    // as done for the same habit.
+    const { value, completed } = habitCompletion(habit!.type, body.value, habit!.targetValue);
 
     const log = await prisma.habitLog.upsert({
       where: { habitId_date: { habitId: habit!.id, date } },

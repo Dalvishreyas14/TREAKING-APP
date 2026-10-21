@@ -288,6 +288,231 @@ export const timeBlockListQuerySchema = z.object({
 });
 export type TimeBlockListQuery = z.infer<typeof timeBlockListQuerySchema>;
 
+// ---------------------------------------------------------------- fitness
+
+export const muscleGroupSchema = z.enum([
+  "CHEST",
+  "BACK",
+  "SHOULDERS",
+  "ARMS",
+  "CORE",
+  "LEGS",
+  "GLUTES",
+  "FULL_BODY",
+  "CARDIO",
+  "OTHER",
+]);
+export type MuscleGroupInput = z.infer<typeof muscleGroupSchema>;
+
+/**
+ * A muscle group as written on a *plan*, which is free text rather than the
+ * library enum. See `Workout.muscleGroups` in the schema for why: "Chest +
+ * Triceps" and "Abs" are what people schedule, and the fixed enum cannot hold
+ * them without losing the distinction. Bounded so a plan cannot store a novel.
+ */
+export const muscleGroupTagSchema = z
+  .string()
+  .trim()
+  .min(1, "Muscle groups cannot be blank")
+  .max(40, "Keep a muscle group under 40 characters");
+
+/** The full workout lifecycle. Only `COMPLETED` counts as done. */
+export const workoutStatusSchema = z.enum([
+  "PLANNED",
+  "IN_PROGRESS",
+  "COMPLETED",
+  "SKIPPED",
+  "RESCHEDULED",
+]);
+export type WorkoutStatusInput = z.infer<typeof workoutStatusSchema>;
+
+/**
+ * The exercise library.
+ *
+ * `name` is unique per owner at the database level, so this schema only trims
+ * and bounds it. That uniqueness is deliberately per-owner rather than global:
+ * two users are allowed to call the same movement by different names, and a
+ * system exercise is copied into the user's own library rather than edited, so
+ * one user renaming "Bench Press" never touches anyone else's list.
+ */
+export const exerciseCreateSchema = z.object({
+  name: z.string().trim().min(1, "Give the exercise a name").max(120),
+  muscleGroup: muscleGroupSchema.default("OTHER"),
+  equipment: z.string().trim().max(80).nullable().optional(),
+  notes: z.string().trim().max(2000).nullable().optional(),
+});
+export type ExerciseCreateInput = z.infer<typeof exerciseCreateSchema>;
+
+export const exerciseUpdateSchema = exerciseCreateSchema.partial();
+export type ExerciseUpdateInput = z.infer<typeof exerciseUpdateSchema>;
+
+export const exerciseListQuerySchema = z.object({
+  muscleGroup: muscleGroupSchema.optional(),
+  search: z.string().trim().max(120).optional(),
+});
+export type ExerciseListQuery = z.infer<typeof exerciseListQuerySchema>;
+
+/**
+ * One set within a workout.
+ *
+ * Strength sets carry `reps`/`weight`; timed work (a plank, a cardio interval)
+ * carries `durationSeconds`. Every measure is optional so the two shapes share
+ * one table without a sentinel like a zero-weight bodyweight set pretending to
+ * be a 0kg lift — the UI and the personal-best maths tell them apart by which
+ * field is actually present.
+ */
+const workoutSetInputSchema = z.object({
+  reps: z.coerce.number().int().min(0).max(100000).nullable().optional(),
+  weight: z.coerce.number().min(0).max(100000).nullable().optional(),
+  durationSeconds: z.coerce.number().int().min(0).max(86400).nullable().optional(),
+  restSeconds: z.coerce.number().int().min(0).max(86400).nullable().optional(),
+  /** A set can be logged without completing every rep. */
+  completed: z.boolean().default(true),
+});
+
+/**
+ * One exercise within a workout. `name` is required rather than derived from
+ * `exerciseId` so a workout for a movement that is not in the library (or whose
+ * library entry was later deleted) can still be logged and named.
+ */
+const workoutExerciseInputSchema = z.object({
+  exerciseId: z.string().min(1).nullable().optional(),
+  name: z.string().trim().min(1, "Give the exercise a name").max(120),
+  notes: z.string().trim().max(2000).nullable().optional(),
+  sets: z.array(workoutSetInputSchema).max(100).default([]),
+});
+
+/**
+ * A workout.
+ *
+ * `date` is the same validated calendar day the planner uses, and the optional
+ * `startMinutes` is a time of day rather than an instant, for the same reasons:
+ * a workout belongs to a day, and "6pm on the 27th" is a wall-clock statement
+ * the server resolves into `startAt` in one place.
+ *
+ * `status` defaults to COMPLETED — logging a session after doing it is the
+ * common case, and planning one is the explicit act.
+ */
+export const workoutCreateSchema = z.object({
+  name: z.string().trim().min(1, "Give the workout a name").max(120),
+  date: isoDay,
+  startMinutes: z.coerce.number().int().min(0).max(1439).nullable().optional(),
+  minutes: z.coerce.number().int().min(0).max(1440).nullable().optional(),
+  notes: z.string().trim().max(4000).nullable().optional(),
+  status: workoutStatusSchema.default("COMPLETED"),
+  muscleGroups: z.array(muscleGroupTagSchema).max(20).default([]),
+  categoryId: z.string().min(1).nullable().optional(),
+  goalId: z.string().min(1).nullable().optional(),
+  habitId: z.string().min(1).nullable().optional(),
+  exercises: z.array(workoutExerciseInputSchema).max(100).default([]),
+});
+export type WorkoutCreateInput = z.infer<typeof workoutCreateSchema>;
+
+/**
+ * Partial update. Note that `exercises`, when present, *replaces* the whole
+ * exercise tree; when absent, the existing tree is left untouched. The handler
+ * keys off `!== undefined` rather than truthiness precisely so an empty array
+ * (clear all exercises) is distinguishable from "not sent".
+ */
+export const workoutUpdateSchema = workoutCreateSchema.partial();
+export type WorkoutUpdateInput = z.infer<typeof workoutUpdateSchema>;
+
+/**
+ * Moving a planned session to a different day as a *reschedule* rather than a
+ * plain edit. The original slot is closed as RESCHEDULED and a fresh PLANNED
+ * copy is created, so the week shows the move honestly instead of the session
+ * quietly teleporting.
+ */
+export const workoutRescheduleSchema = z.object({
+  date: isoDay,
+  startMinutes: z.coerce.number().int().min(0).max(1439).nullable().optional(),
+});
+export type WorkoutRescheduleInput = z.infer<typeof workoutRescheduleSchema>;
+
+export const workoutListQuerySchema = z.object({
+  from: isoDay.optional(),
+  to: isoDay.optional(),
+  status: workoutStatusSchema.optional(),
+  limit: z.coerce.number().int().min(1).max(365).default(60),
+});
+export type WorkoutListQuery = z.infer<typeof workoutListQuerySchema>;
+
+// ------------------------------------------------- weekly workout routines
+
+/**
+ * One planned set in a routine. Same optional measures as `WorkoutSet` minus
+ * `completed`, because a template describes intent, not a logged result.
+ */
+const routineSetInputSchema = z.object({
+  reps: z.coerce.number().int().min(0).max(100000).nullable().optional(),
+  weight: z.coerce.number().min(0).max(100000).nullable().optional(),
+  durationSeconds: z.coerce.number().int().min(0).max(86400).nullable().optional(),
+  restSeconds: z.coerce.number().int().min(0).max(86400).nullable().optional(),
+});
+
+const routineExerciseInputSchema = z.object({
+  exerciseId: z.string().min(1).nullable().optional(),
+  name: z.string().trim().min(1, "Give the exercise a name").max(120),
+  notes: z.string().trim().max(2000).nullable().optional(),
+  restSeconds: z.coerce.number().int().min(0).max(86400).nullable().optional(),
+  sets: z.array(routineSetInputSchema).max(100).default([]),
+});
+
+const routineDayInputSchema = z.object({
+  /** 0 = Monday .. 6 = Sunday. */
+  weekday: z.coerce.number().int().min(0).max(6),
+  name: z.string().trim().min(1, "Give the day a name").max(120),
+  muscleGroups: z.array(muscleGroupTagSchema).max(20).default([]),
+  isRest: z.boolean().default(false),
+  targetMinutes: z.coerce.number().int().min(0).max(1440).nullable().optional(),
+  startMinutes: z.coerce.number().int().min(0).max(1439).nullable().optional(),
+  notes: z.string().trim().max(2000).nullable().optional(),
+  exercises: z.array(routineExerciseInputSchema).max(100).default([]),
+});
+
+export const workoutRoutineCreateSchema = z.object({
+  name: z.string().trim().min(1, "Give the routine a name").max(120),
+  description: z.string().trim().max(2000).nullable().optional(),
+  color: z
+    .string()
+    .trim()
+    .regex(/^#[0-9a-fA-F]{6}$/, "Use a hex colour like #C8F751")
+    .optional(),
+  days: z.array(routineDayInputSchema).max(7).default([]),
+});
+export type WorkoutRoutineCreateInput = z.infer<typeof workoutRoutineCreateSchema>;
+
+export const workoutRoutineUpdateSchema = workoutRoutineCreateSchema.partial();
+export type WorkoutRoutineUpdateInput = z.infer<typeof workoutRoutineUpdateSchema>;
+
+/** Which week a schedule request is for; defaults to the current one server-side. */
+export const workoutScheduleQuerySchema = z.object({
+  week: isoDay.optional(),
+});
+export type WorkoutScheduleQuery = z.infer<typeof workoutScheduleQuerySchema>;
+
+/**
+ * How far a routine edit should reach.
+ *
+ * `future` regenerates every not-yet-done PLANNED session from today onwards;
+ * `week` only re-materialises the named week. Past sessions and anything the
+ * user has already acted on (completed, skipped, in progress, rescheduled) are
+ * never touched either way — the template changing must not rewrite history or
+ * undo a decision the user made in the moment.
+ */
+export const workoutRoutineApplySchema = z.object({
+  scope: z.enum(["future", "week"]).default("future"),
+  week: isoDay.optional(),
+});
+export type WorkoutRoutineApplyInput = z.infer<typeof workoutRoutineApplySchema>;
+
+/** Turn a concrete week's plan into a reusable routine. */
+export const workoutRoutineFromWeekSchema = z.object({
+  name: z.string().trim().min(1, "Give the routine a name").max(120),
+  description: z.string().trim().max(2000).nullable().optional(),
+  week: isoDay,
+});
+export type WorkoutRoutineFromWeekInput = z.infer<typeof workoutRoutineFromWeekSchema>;
 
 // ------------------------------------------------------------------ goals
 
@@ -538,81 +763,6 @@ export const passwordChangeSchema = z
     path: ["newPassword"],
   });
 export type PasswordChangeInput = z.infer<typeof passwordChangeSchema>;
-
-// ---------------------------------------------------------------------------
-// Knowledge
-// ---------------------------------------------------------------------------
-
-/**
- * A URL that is optional but must be usable if given.
- *
- * `z.url()` is not enough on its own: it accepts anything with a scheme, so
- * `javascript:alert(1)` and `data:text/html,...` are both "valid" and both get
- * rendered into an `href`. Since a resource link is shown to whoever has this
- * account and could plausibly come from an imported list, the scheme is
- * allowlisted to the three that mean "a page you can visit".
- */
-const httpUrl = z
-  .string()
-  .trim()
-  .max(2000)
-  .refine(
-    (value) => {
-      if (value === "") return true;
-      try {
-        const { protocol } = new URL(value);
-        return protocol === "http:" || protocol === "https:";
-      } catch {
-        return false;
-      }
-    },
-    { message: "Enter a link starting with http:// or https://" },
-  );
-
-export const noteCreateSchema = z.object({
-  title: z.string().trim().min(1, "Give the note a title").max(200),
-  body: z.string().trim().max(20_000).default(""),
-  pinned: z.coerce.boolean().default(false),
-  // Every link is optional. A note is allowed to be loose, and detaching one from
-  // its subject must never destroy it.
-  taskId: z.string().min(1).nullable().optional(),
-  goalId: z.string().min(1).nullable().optional(),
-  projectId: z.string().min(1).nullable().optional(),
-  categoryId: z.string().min(1).nullable().optional(),
-  resourceId: z.string().min(1).nullable().optional(),
-});
-export type NoteCreateInput = z.infer<typeof noteCreateSchema>;
-
-export const noteUpdateSchema = noteCreateSchema.partial();
-export type NoteUpdateInput = z.infer<typeof noteUpdateSchema>;
-
-export const resourceCreateSchema = z.object({
-  title: z.string().trim().min(1, "Name the resource").max(200),
-  kind: z
-    .enum(["BOOK", "COURSE", "ARTICLE", "VIDEO", "PODCAST", "PAPER", "TOOL", "OTHER"])
-    .default("OTHER"),
-  status: z.enum(["WANTING", "IN_PROGRESS", "ON_HOLD", "FINISHED", "DROPPED"]).default("WANTING"),
-  url: httpUrl.nullable().optional(),
-  author: z.string().trim().max(200).nullable().optional(),
-  summary: z.string().trim().max(4000).nullable().optional(),
-  /**
-   * Hand-set 0-100: how far through it you are is a judgement, not a measurement.
-   *
-   * Optional rather than defaulting to 0, and the difference matters downstream.
-   * `resourceTransition` needs to tell "explicitly zero" from "said nothing" so
-   * that creating something directly as FINISHED can force the bar to 100 without
-   * a default of 0 silently overriding it.
-   */
-  progress: z.coerce.number().int().min(0).max(100).optional(),
-  rating: z.coerce.number().int().min(1).max(5).nullable().optional(),
-  goalId: z.string().min(1).nullable().optional(),
-  projectId: z.string().min(1).nullable().optional(),
-  categoryId: z.string().min(1).nullable().optional(),
-});
-export type ResourceCreateInput = z.infer<typeof resourceCreateSchema>;
-
-export const resourceUpdateSchema = resourceCreateSchema.partial();
-export type ResourceUpdateInput = z.infer<typeof resourceUpdateSchema>;
 
 // ---------------------------------------------------------------------------
 // Reminders
@@ -929,3 +1079,310 @@ export const weeklyReviewNotesSchema = z.object({
   nextWeekFocus: z.string().trim().max(2000).nullable().optional(),
 });
 export type WeeklyReviewNotesInput = z.infer<typeof weeklyReviewNotesSchema>;
+
+// ------------------------------------------------------------------- study
+
+/**
+ * Study timetable contracts.
+ *
+ * A session's shape is deliberately the same as the planner's time blocks -
+ * a day, a start, a length - but it stores *minutes from local midnight*
+ * rather than a pair of instants. "Monday 7pm" is a slot on the user's own
+ * clock, and a slot that drifts by an hour twice a year because of daylight
+ * saving is not a slot.
+ *
+ * Both `durationMinutes` and `endMinutes` are accepted, because the form thinks
+ * in end times ("7pm to 8pm") and the database thinks in lengths. The rule that
+ * the end must be after the start is enforced once, here, so it cannot be
+ * forgotten on one path and enforced on another.
+ */
+
+const studyTitle = z.string().trim().min(1, "Give the session a title").max(120);
+const studySubject = z.string().trim().min(1, "Name the subject").max(80);
+const studyNotes = z.string().trim().max(4000).nullable().optional();
+const studyColor = z
+  .string()
+  .trim()
+  .regex(/^#[0-9a-fA-F]{6}$/, "Use a hex colour like #C8F751")
+  .optional();
+
+/** A weekday index, JS convention: 0 = Sunday .. 6 = Saturday. */
+const weekdayIndex = z.coerce.number().int().min(0).max(6);
+
+/** Minutes from local midnight. */
+const startMinutes = z.coerce.number().int().min(0, "Start time is out of range").max(1439);
+
+const reminderLead = z.coerce
+  .number()
+  .int()
+  .min(0, "A reminder cannot lead by a negative time")
+  .max(1440, "A reminder cannot lead by more than a day")
+  .nullable()
+  .optional();
+
+export const studyRepeatSchema = z.enum(["WEEKLY", "CUSTOM", "NONE"]);
+
+export const studySessionStatusSchema = z.enum([
+  "PLANNED",
+  "IN_PROGRESS",
+  "COMPLETED",
+  "MISSED",
+  "RESCHEDULED",
+]);
+
+/**
+ * The shared shape of a session's timing.
+ *
+ * `endMinutes` is optional and only used to derive the duration when it is
+ * sent. The refinement is what guarantees the end is after the start and that
+ * the session fits inside the day.
+ */
+const studyTimingShape = {
+  date: isoDay,
+  startMinutes,
+  durationMinutes: z.coerce
+    .number()
+    .int()
+    .min(1, "A session needs a length")
+    .max(1440, "A session cannot be longer than a day")
+    .optional(),
+  endMinutes: z.coerce
+    .number()
+    .int()
+    .min(1, "End time is out of range")
+    .max(1440, "End time is out of range")
+    .optional(),
+};
+
+/**
+ * The same timing shape, with every field optional.
+ *
+ * Used by the update schemas. A patch is a patch: "mark this done" carries a
+ * status and nothing else, and a schema that demanded a date and a start time
+ * for that would force every caller to send the current timing back and hope it
+ * was still accurate. The route merges the patch onto the stored session and
+ * validates the *merged* result, so the strictness still happens - it just
+ * happens once, against the real values.
+ */
+const studyPartialTimingShape = {
+  date: isoDay.optional(),
+  startMinutes: startMinutes.optional(),
+  durationMinutes: studyTimingShape.durationMinutes.optional(),
+  endMinutes: studyTimingShape.endMinutes.optional(),
+};
+
+/**
+ * Turn a timing shape into a length.
+ *
+ * Exported because the client form needs exactly the same arithmetic to show
+ * a live duration as it types, and a form that previews 60 minutes and then
+ * saves 90 is worse than a form that refuses to save.
+ */
+export function resolveStudyDuration(
+  start: number,
+  duration: number | undefined,
+  end: number | undefined,
+): { durationMinutes: number } | { error: string; field: "durationMinutes" | "endMinutes" } {
+  if (end !== undefined) {
+    if (end <= start) {
+      return { error: "The end time has to be after the start time", field: "endMinutes" };
+    }
+    if (end > 1440) {
+      return { error: "A session cannot run past midnight", field: "endMinutes" };
+    }
+    return { durationMinutes: end - start };
+  }
+  if (duration === undefined) {
+    return { error: "A session needs a length", field: "durationMinutes" };
+  }
+  if (start + duration > 1440) {
+    return { error: "A session cannot run past midnight", field: "durationMinutes" };
+  }
+  return { durationMinutes: duration };
+}
+
+export const studySessionCreateSchema = z
+  .object({
+    title: studyTitle,
+    subject: studySubject,
+    notes: studyNotes,
+    color: studyColor,
+    ...studyTimingShape,
+    reminderLeadMinutes: reminderLead,
+    habitId: z.string().min(1).nullable().optional(),
+    categoryId: z.string().min(1).nullable().optional(),
+    /**
+     * Create the session as part of a recurring series. When present the
+     * session is the first occurrence of that series, and the series is
+     * created with it.
+     */
+    series: z
+      .object({
+        repeat: studyRepeatSchema,
+        daysOfWeek: z.array(weekdayIndex).max(7).default([]),
+      })
+      .nullable()
+      .optional(),
+  })
+  .superRefine((value, ctx) => {
+    const resolved = resolveStudyDuration(
+      value.startMinutes,
+      value.durationMinutes,
+      value.endMinutes,
+    );
+    if ("error" in resolved) {
+      ctx.addIssue({ code: "custom", message: resolved.error, path: [resolved.field] });
+    }
+  });
+export type StudySessionCreateInput = z.input<typeof studySessionCreateSchema>;
+export type StudySessionCreateOutput = z.output<typeof studySessionCreateSchema>;
+
+/**
+ * Partial update of a single session.
+ *
+ * Editing one occurrence of a series sets `isException` on it, which is what
+ * stops the next series-wide edit from overwriting the user's change.
+ */
+export const studySessionUpdateSchema = z
+  .object({
+    title: studyTitle.optional(),
+    subject: studySubject.optional(),
+    notes: studyNotes,
+    color: studyColor,
+    ...studyPartialTimingShape,
+    reminderLeadMinutes: reminderLead,
+    habitId: z.string().min(1).nullable().optional(),
+    categoryId: z.string().min(1).nullable().optional(),
+    status: studySessionStatusSchema.optional(),
+  })
+  .superRefine((value, ctx) => {
+    // Only check the timing when this update actually carries one. A patch that
+    // only renames a session must not fail because it left the times out.
+    const hasTiming =
+      value.date !== undefined ||
+      value.startMinutes !== undefined ||
+      value.durationMinutes !== undefined ||
+      value.endMinutes !== undefined;
+    if (!hasTiming) return;
+    if (value.startMinutes === undefined) return;
+    // Moving the start time without saying anything about the length keeps the
+    // length the session already had, so there is nothing to resolve here.
+    if (value.durationMinutes === undefined && value.endMinutes === undefined) return;
+
+    const resolved = resolveStudyDuration(
+      value.startMinutes,
+      value.durationMinutes,
+      value.endMinutes,
+    );
+    if ("error" in resolved) {
+      ctx.addIssue({ code: "custom", message: resolved.error, path: [resolved.field] });
+    }
+  });
+export type StudySessionUpdateInput = z.input<typeof studySessionUpdateSchema>;
+export type StudySessionUpdateOutput = z.output<typeof studySessionUpdateSchema>;
+
+/**
+ * Moving a session to another day.
+ *
+ * The original slot is closed as RESCHEDULED and a fresh PLANNED copy is
+ * created, so the week shows the move rather than the session quietly
+ * teleporting and the old slot quietly vanishing.
+ */
+export const studySessionRescheduleSchema = z.object({
+  date: isoDay,
+  startMinutes: startMinutes.optional(),
+  endMinutes: z.coerce.number().int().min(1).max(1440).optional(),
+  durationMinutes: z.coerce.number().int().min(1).max(1440).optional(),
+});
+export type StudySessionRescheduleInput = z.input<typeof studySessionRescheduleSchema>;
+
+export const studySessionListQuerySchema = z.object({
+  from: isoDay.optional(),
+  to: isoDay.optional(),
+  status: studySessionStatusSchema.optional(),
+});
+export type StudySessionListQuery = z.infer<typeof studySessionListQuerySchema>;
+
+export const studySeriesCreateSchema = z
+  .object({
+    title: studyTitle,
+    subject: studySubject,
+    notes: studyNotes,
+    color: studyColor,
+    repeat: studyRepeatSchema,
+    daysOfWeek: z.array(weekdayIndex).max(7).default([]),
+    startMinutes,
+    durationMinutes: z.coerce
+      .number()
+      .int()
+      .min(1, "A session needs a length")
+      .max(1440, "A session cannot be longer than a day"),
+    endMinutes: z.coerce.number().int().min(1).max(1440).optional(),
+    reminderLeadMinutes: reminderLead,
+    habitId: z.string().min(1).nullable().optional(),
+    categoryId: z.string().min(1).nullable().optional(),
+  })
+  .superRefine((value, ctx) => {
+    const resolved = resolveStudyDuration(
+      value.startMinutes,
+      value.durationMinutes,
+      value.endMinutes,
+    );
+    if ("error" in resolved) {
+      ctx.addIssue({ code: "custom", message: resolved.error, path: [resolved.field] });
+    }
+    if (value.repeat === "CUSTOM" && value.daysOfWeek.length === 0) {
+      ctx.addIssue({
+        code: "custom",
+        message: "Pick at least one day",
+        path: ["daysOfWeek"],
+      });
+    }
+    if (value.repeat === "WEEKLY" && value.daysOfWeek.length > 1) {
+      ctx.addIssue({
+        code: "custom",
+        message: "A weekly series happens on one day",
+        path: ["daysOfWeek"],
+      });
+    }
+  });
+export type StudySeriesCreateInput = z.input<typeof studySeriesCreateSchema>;
+export type StudySeriesCreateOutput = z.output<typeof studySeriesCreateSchema>;
+
+export const studySeriesUpdateSchema = z
+  .object({
+    title: studyTitle.optional(),
+    subject: studySubject.optional(),
+    notes: studyNotes,
+    color: studyColor,
+    repeat: studyRepeatSchema.optional(),
+    daysOfWeek: z.array(weekdayIndex).max(7).optional(),
+    startMinutes: startMinutes.optional(),
+    durationMinutes: z.coerce.number().int().min(1).max(1440).optional(),
+    endMinutes: z.coerce.number().int().min(1).max(1440).optional(),
+    reminderLeadMinutes: reminderLead,
+    habitId: z.string().min(1).nullable().optional(),
+    categoryId: z.string().min(1).nullable().optional(),
+    isActive: z.boolean().optional(),
+  })
+  .superRefine((value, ctx) => {
+    if (value.startMinutes !== undefined) {
+      const resolved = resolveStudyDuration(
+        value.startMinutes,
+        value.durationMinutes,
+        value.endMinutes,
+      );
+      if ("error" in resolved) {
+        ctx.addIssue({ code: "custom", message: resolved.error, path: [resolved.field] });
+      }
+    }
+    if (value.repeat === "CUSTOM" && value.daysOfWeek && value.daysOfWeek.length === 0) {
+      ctx.addIssue({
+        code: "custom",
+        message: "Pick at least one day",
+        path: ["daysOfWeek"],
+      });
+    }
+  });
+export type StudySeriesUpdateInput = z.input<typeof studySeriesUpdateSchema>;
+export type StudySeriesUpdateOutput = z.output<typeof studySeriesUpdateSchema>;

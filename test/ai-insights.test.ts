@@ -57,14 +57,6 @@ function emptySnapshot(overrides: Partial<LifeSnapshot> = {}): LifeSnapshot {
     goals: [],
     projects: [],
     routines: [],
-    knowledge: {
-      notes: [],
-      resources: [],
-      noteCount: 0,
-      resourceCount: 0,
-      recentNoteCount: 0,
-      recentResourceCount: 0,
-    },
     sparse: false,
     ...overrides,
   };

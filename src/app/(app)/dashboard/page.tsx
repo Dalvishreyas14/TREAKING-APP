@@ -17,7 +17,8 @@ import { DashboardInsights } from "@/components/app/dashboard-panels";
 import { loadSnapshot } from "@/lib/ai/snapshot";
 import { requireUser } from "@/lib/auth/guards";
 import { prisma } from "@/lib/db";
-import { todayUtc } from "@/lib/date";
+import { addDaysUtc, todayUtc } from "@/lib/date";
+import { ensureActiveSchedule } from "@/lib/fitness/schedule";
 import { formatIndianLong, indianWeek } from "@/lib/format/date";
 import { cn } from "@/lib/utils";
 
@@ -76,6 +77,16 @@ export default async function DashboardPage() {
   const snapshotPromise = loadSnapshot(user.id, { days: 30 });
 
   /**
+   * Top up the active workout routine's materialised schedule before reading it,
+   * so "this week's training" is populated on the home screen even on a day the
+   * user has not opened the fitness page. Idempotent and horizon-bounded, so it
+   * is a no-op once the schedule is filled.
+   */
+  await ensureActiveSchedule(user.id);
+
+  const trainingEnd = addDaysUtc(today, 6);
+
+  /**
    * Run as one round trip. Independent counts would each be their own query;
    * this is one, and the numbers arrive together.
    */
@@ -89,6 +100,7 @@ export default async function DashboardPage() {
     wellbeing,
     insights,
     streak,
+    weekTraining,
   ] = await Promise.all([
     prisma.task.count({
       where: { userId: user.id, status: { in: ["TODO", "IN_PROGRESS", "BLOCKED"] } },
@@ -136,6 +148,23 @@ export default async function DashboardPage() {
       take: 2,
     }),
     prisma.userStats.findUnique({ where: { userId: user.id } }),
+    prisma.workout.findMany({
+      where: {
+        userId: user.id,
+        status: { in: ["PLANNED", "IN_PROGRESS"] },
+        date: { gte: today, lte: trainingEnd },
+      },
+      orderBy: [{ date: "asc" }, { startAt: "asc" }],
+      take: 5,
+      select: {
+        id: true,
+        name: true,
+        date: true,
+        status: true,
+        muscleGroups: true,
+        minutes: true,
+      },
+    }),
   ]);
 
   const snapshot = await snapshotPromise;
@@ -375,6 +404,49 @@ export default async function DashboardPage() {
               )}
             </CardContent>
           </Card>
+
+          <Card>
+            <CardHeader className="flex-row items-center justify-between space-y-0 pb-3">
+              <CardTitle className="text-[13px]">This week’s training</CardTitle>
+              <Button variant="ghost" size="xs" asChild>
+                <a href="/fitness">
+                  Plan
+                  <ArrowRight aria-hidden />
+                </a>
+              </Button>
+            </CardHeader>
+            <CardContent>
+              {weekTraining.length === 0 ? (
+                <p className="text-[13px] text-ink-subtle">
+                  Nothing scheduled. Build a routine on the fitness page.
+                </p>
+              ) : (
+                <ul className="flex flex-col gap-2.5">
+                  {weekTraining.map((workout) => (
+                    <li key={workout.id} className="flex items-center gap-2.5">
+                      <span className="w-8 shrink-0 text-[11px] font-medium uppercase tracking-wide text-ink-subtle">
+                        {weekdayLabel(workout.date)}
+                      </span>
+                      <span className="flex-1 truncate text-[13px]">
+                        {workout.name}
+                        {workout.muscleGroups.length > 0 ? (
+                          <span className="text-ink-subtle">
+                            {" "}
+                            · {workout.muscleGroups.slice(0, 2).join(", ")}
+                          </span>
+                        ) : null}
+                      </span>
+                      {workout.status === "IN_PROGRESS" ? (
+                        <Badge variant="amber" size="sm">
+                          Now
+                        </Badge>
+                      ) : null}
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </CardContent>
+          </Card>
         </div>
       </div>
 
@@ -459,6 +531,11 @@ function Stat({
       </div>
     </Card>
   );
+}
+
+/** Short weekday for a `@db.Date`, read from UTC so the day never shifts. */
+function weekdayLabel(date: Date): string {
+  return date.toLocaleDateString("en-GB", { weekday: "short", timeZone: "UTC" });
 }
 
 /** A single 1-5 wellbeing reading, drawn as five pips rather than a number alone. */
